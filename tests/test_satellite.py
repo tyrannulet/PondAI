@@ -1,6 +1,7 @@
 import unittest
 
 from scripts.satellite import _extract_time_series
+from scripts.satellite import _project_geometry
 
 
 class ExtractTimeSeriesTests(unittest.TestCase):
@@ -12,7 +13,13 @@ class ExtractTimeSeriesTests(unittest.TestCase):
                     "outputs": {
                         "indices": {
                             "bands": {
-                                "B0": {"stats": {"mean": "0.4137", "sampleCount": "4"}},
+                                "B0": {
+                                    "stats": {
+                                        "mean": "0.4137",
+                                        "sampleCount": "4",
+                                        "noDataCount": "2",
+                                    }
+                                },
                                 "B1": {"stats": {"mean": "-0.12"}},
                                 "B2": {"stats": {"mean": "0.2", "percentiles": {"50.0": "0.18"}}},
                                 "B3": {"stats": {"mean": "0.75"}},
@@ -35,7 +42,7 @@ class ExtractTimeSeriesTests(unittest.TestCase):
                     "ndci": 0.2,
                     "ndci_median": 0.18,
                     "water_percent": 75.0,
-                    "valid_pixels": 4,
+                    "valid_pixels": 2,
                     "quality": "nízká spolehlivost",
                 }
             ],
@@ -67,3 +74,16 @@ class ExtractTimeSeriesTests(unittest.TestCase):
         self.assertEqual(result[0]["ndci_median"], None)
         self.assertEqual(result[0]["water_percent"], None)
         self.assertEqual(result[0]["valid_pixels"], None)
+
+    def test_projects_wgs84_polygon_to_metric_sentinel_crs(self):
+        geometry = {
+            "type": "Polygon",
+            "coordinates": [[[14.2934, 49.8956], [14.2944, 49.8956], [14.2934, 49.8956]]],
+        }
+
+        projected = _project_geometry(geometry)
+        longitude_m, latitude_m = projected["coordinates"][0][0]
+
+        self.assertGreater(longitude_m, 100_000)
+        self.assertGreater(latitude_m, 100_000)
+        self.assertNotEqual(projected["coordinates"][0][0], geometry["coordinates"][0][0])

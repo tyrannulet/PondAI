@@ -8,3 +8,4 @@ streamlit-folium>=0.22.0
 openai>=1.59.0
 numpy>=2.0.0
 shapely>=2.0.0
+pyproj>=3.6.1

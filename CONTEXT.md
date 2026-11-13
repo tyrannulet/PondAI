@@ -55,3 +55,11 @@ Záznam významných změn a důvodů jejich provedení. Při dalších úpravá
 - Pád při analýze Řiteckého rybníka způsobila textová hodnota statistiky (např. `"0.42"`) v odpovědi Sentinel Hub, kterou kód před zaokrouhlením nepřevedl na číslo.
 - Přidán bezpečný převod číselných hodnot i řetězců; nečíselné a nekonečné hodnoty se považují za nedostupná měření. Převod se používá pro indexy, medián, podíl vody i počet pixelů.
 - Přidány regresní testy pro číselné řetězce a neplatné hodnoty.
+
+## 2026-11-13 — výpočet podílu vodní plochy
+
+- Živá odpověď Sentinel Hub pro Řitecký rybník uváděla `geometryPixelCount: 1`: polygon byl posílán v EPSG:4326 (stupně), zatímco rozlišení `resx/resy` je v metrech. Jediný pixel způsobil, že průměr binárního příznaku vody mohl být jen 0 % nebo 100 %.
+- Geometrie se před statistickým požadavkem převádí do metrického EPSG:3035 a pracuje se v nativním rozlišení 10 m. Přidána závislost `pyproj`.
+- Opraven výpočet platných pixelů jako `sampleCount - noDataCount`, v souladu se strukturou odpovědi Statistical API; období bez platných pixelů už nevykazuje falešných 0 %.
+- Živé ověření Řiteckého rybníka za 2026-08-13 až 2026-11-13: geometrie pokrývá 89 pixelů místo 1; podíly jsou většinou průběžné hodnoty přibližně 20–38 %, jedno období 0 % a období bez dat je `n/a`.
+- Přidán regresní test převodu polygonu do metrického souřadnicového systému a odečítání pixelů v `noDataCount`.

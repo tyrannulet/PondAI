@@ -5,6 +5,7 @@ import math
 import time
 from typing import Any
 
+from pyproj import Transformer
 import requests
 
 from scripts import demo_data
@@ -13,6 +14,10 @@ from scripts.geo_sources import get_pond_by_id
 
 TOKEN_CACHE: dict[str, Any] = {"token": None, "expires_at": 0.0}
 SENTINEL_HUB_URL = "https://sh.dataspace.copernicus.eu/statistics/v1"
+SENTINEL_HUB_CRS = "http://www.opengis.net/def/crs/EPSG/0/3035"
+_WGS84_TO_SENTINEL_HUB_TRANSFORMER = Transformer.from_crs(
+    "EPSG:4326", "EPSG:3035", always_xy=True
+)
 
 
 def _now_epoch() -> float:
@@ -54,7 +59,7 @@ def _sentinel_hub_statistics(geometry: dict[str, Any], date_from: str, date_to: 
         "input": {
             "bounds": {
                 "geometry": geometry,
-                "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"},
+                "properties": {"crs": SENTINEL_HUB_CRS},
             },
             "data": [{"type": "sentinel-2-l2a", "dataFilter": {"mosaickingOrder": "leastCC"}}],
         },
@@ -62,8 +67,8 @@ def _sentinel_hub_statistics(geometry: dict[str, Any], date_from: str, date_to: 
             "timeRange": {"from": start, "to": end},
             "aggregationInterval": {"of": "P10D"},
             "evalscript": evalscript,
-            "resx": 20,
-            "resy": 20,
+            "resx": 10,
+            "resy": 10,
         },
         "calculations": {
             "default": {
@@ -119,6 +124,29 @@ def _as_float(value: Any) -> float | None:
     return parsed_value if math.isfinite(parsed_value) else None
 
 
+def _project_coordinates(coordinates: Any) -> Any:
+    if (
+        isinstance(coordinates, (list, tuple))
+        and len(coordinates) >= 2
+        and isinstance(coordinates[0], (int, float))
+        and isinstance(coordinates[1], (int, float))
+    ):
+        x, y = _WGS84_TO_SENTINEL_HUB_TRANSFORMER.transform(
+            float(coordinates[0]), float(coordinates[1])
+        )
+        return [x, y, *coordinates[2:]]
+    if isinstance(coordinates, (list, tuple)):
+        return [_project_coordinates(part) for part in coordinates]
+    raise ValueError("Geometrie rybníka má neplatný formát souřadnic.")
+
+
+def _project_geometry(geometry: dict[str, Any]) -> dict[str, Any]:
+    coordinates = geometry.get("coordinates")
+    if not isinstance(coordinates, (list, tuple)):
+        raise ValueError("Geometrie rybníka neobsahuje platné souřadnice.")
+    return {**geometry, "coordinates": _project_coordinates(coordinates)}
+
+
 def _extract_time_series(payload: dict[str, Any]) -> list[dict[str, Any]]:
     data = payload.get("data") if isinstance(payload, dict) else []
     if not isinstance(data, list):
@@ -136,7 +164,13 @@ def _extract_time_series(payload: dict[str, Any]) -> list[dict[str, Any]]:
         band_stats = [((bands.get(f"B{index}") or {}).get("stats") or {}) for index in range(4)]
         means = [_as_float(stat.get("mean")) for stat in band_stats]
         ndwi, ndti, ndci, water_share = means
-        valid_pixels = _as_float(band_stats[0].get("sampleCount"))
+        sample_count = _as_float(band_stats[0].get("sampleCount"))
+        no_data_count = _as_float(band_stats[0].get("noDataCount"))
+        valid_pixels = (
+            max(0, round(sample_count - (no_data_count or 0)))
+            if sample_count is not None
+            else None
+        )
         ndci_median = _as_float((band_stats[2].get("percentiles") or {}).get("50.0"))
         series.append(
             {
@@ -145,8 +179,8 @@ def _extract_time_series(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 "ndti": round(ndti, 3) if ndti is not None else None,
                 "ndci": round(ndci, 3) if ndci is not None else None,
                 "ndci_median": round(ndci_median, 3) if ndci_median is not None else None,
-                "water_percent": round(water_share * 100, 2) if water_share is not None else None,
-                "valid_pixels": int(valid_pixels) if valid_pixels is not None else None,
+                "water_percent": round(water_share * 100, 2) if water_share is not None and valid_pixels else None,
+                "valid_pixels": valid_pixels,
                 "quality": "nízká spolehlivost" if valid_pixels is not None and valid_pixels < 10 else "zjištěno",
             }
         )
@@ -194,7 +228,10 @@ def analyze_pond(pond_id: str, date_from: str, date_to: str) -> dict[str, Any]:
         return {"status": "not_available", "message": "Pro daný rybník není k dispozici polygon pro analýzu."}
 
     try:
-        api_response = _sentinel_hub_statistics(geometry, date_from, date_to, _sentinel2_evalscript())
+        projected_geometry = _project_geometry(geometry)
+        api_response = _sentinel_hub_statistics(
+            projected_geometry, date_from, date_to, _sentinel2_evalscript()
+        )
     except (requests.RequestException, ValueError) as exc:
         return {
             "status": "error",
