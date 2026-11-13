@@ -10,7 +10,7 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 API_DIR = ROOT_DIR / "api"
 DEFAULT_NDWI_THRESHOLD = 0.0
 APP_TITLE = "PondWatch AI"
-APP_SUBTITLE = "AI monitoring českých rybníků ze satelitních dat."
+APP_SUBTITLE = "AI-assisted satellite monitoring of ponds, reservoirs, and other water bodies."
 
 
 def _read_env_file(path: Path) -> dict[str, str]:

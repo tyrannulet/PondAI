@@ -82,3 +82,12 @@ Záznam významných změn a důvodů jejich provedení. Při dalších úpravá
 - Doplněny lokální převody „v Praze“ → „Praha“, „v Mníšku pod Brdy“ → „Mníšek pod Brdy“ a rozpoznání „ve městě Řitka“ i bez AI.
 - Živě ověřeny všechny tři hlášené dotazy bez Featherless: Praha vrací 245 kandidátů, Mníšek pod Brdy 18 a Řitka 2. U všech je filtr rybníka `None`; rok 2025 se zachová u dotazů, které jej obsahují.
 - Přidány regresní testy parseru, výběru obce a zrušení starého filtru při nové lokalitě.
+
+## 2026-11-13 — English reports, optional charts, water types, and ice screening
+
+- Přeloženo uživatelské rozhraní Streamlitu, výchozí odpovědi a demo texty do angličtiny; parser dál přijímá české dotazy a nově rozumí i běžným anglickým formulacím a období „last N months“.
+- Výchozím výsledkem je srozumitelný slovní report s odhadem pokrytí vodou, srovnáním měsíčních NDCI signálů a jasným upozorněním, že satelitní indikátory nejsou laboratorní měření kvality vody. Grafy a tabulka se zobrazí pouze po zapnutí volby nebo žádosti o grafy.
+- Ověřený dotaz na ZABAGED vrstvu „Vodní plocha“ našel tyto kódy `typ_vp_k`: 1 přehradní nádrž, 2 rybník, 3 antropogenní jezero, 4 přírodní jezero, 5 výhonová tůně, 6 koupaliště, 7 rybniční sádka, 8 sedimentační nádrž, 9 ostatní vodní plocha a 10 neurčená vodní plocha. Vyhledávání nyní podporuje rybníky, nádrže, jezera a všechny mapované typy; výsledky zobrazují typ vodního útvaru.
+- Nakonfigurovaná WIC BYOC kolekce při ověření vrátila HTTP 403, proto aplikace netvrdí, že ji může číst. Pro screening možného ledu používá místo toho třídu „snow/ice“ (SCL 11) v Sentinel-2 a započítá jen intervaly s alespoň 10 platnými pixely a konzervativním prahem 15 % a dvou pixelů. Výsledek výslovně označuje jako možný sníh/led, nikoli potvrzené zamrznutí; žádné zjištění také nedokazuje, že plocha nikdy nezamrzla.
+- Živá kontrola Sentinel Hub pro jeden rybník v Řitce (leden 2025) úspěšně vrátila tři intervaly včetně nového `ice_percent`; první interval měl 76 platných pixelů a 0 % klasifikovaných jako sníh/led. Streamlit na portu 8502 odpovídal HTTP 200.
+- Přidány cílené regresní testy pro vodní typy, anglické parsování a data, volitelnost grafů, měsíční report a detekci možného ledu včetně případů s nedostatkem pixelů.

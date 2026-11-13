@@ -7,8 +7,9 @@ from typing import Any
 DEMO_PONDS = {
     "ritka-pond-1": {
         "pond_id": "ritka-pond-1",
-        "name": "Rybník v Řitce",
-        "municipality": "Řítek",
+        "name": "Demo pond in Řitka",
+        "water_body_type": "pond",
+        "municipality": "Řitka",
         "area_m2": 142500,
         "geometry": {
             "type": "Polygon",
@@ -25,7 +26,8 @@ DEMO_PONDS = {
     },
     "lazne-pond-2": {
         "pond_id": "lazne-pond-2",
-        "name": "Bezejmenný rybník",
+        "name": "Unnamed pond",
+        "water_body_type": "pond",
         "municipality": "Lázně Bělohrad",
         "area_m2": 87500,
         "geometry": {
@@ -93,8 +95,8 @@ def generate_demo_analysis(pond_id: str, date_from: str | None = None, date_to: 
                 "water_percent": round(water_pct[index], 2),
                 "ndci": round(ndci_values[index], 3),
                 "valid_pixels": valid_pixels[index],
-                "quality": "dobrá" if valid_pixels[index] > 5000 else "omezená",
-                "cloud_cover": "nízká",
+                "quality": "good" if valid_pixels[index] > 5000 else "limited",
+                "cloud_cover": "low",
             }
         )
 
@@ -103,16 +105,16 @@ def generate_demo_analysis(pond_id: str, date_from: str | None = None, date_to: 
     average_ndci = round(sum(item["ndci"] for item in timeseries) / max(len(timeseries), 1), 3)
     average_water = round(sum(item["water_percent"] for item in timeseries) / max(len(timeseries), 1), 2)
 
-    algae_signal = "Bez výrazné změny"
+    algae_signal = "No strong change detected"
     if average_ndci > 0.2:
-        algae_signal = "Zvýšená algální biomasa"
+        algae_signal = "Elevated algae-related signal"
     if average_ndci > 0.25:
-        algae_signal = "Možný signál vodního květu"
+        algae_signal = "Possible algae-bloom signal"
 
     return {
         "status": "demo",
         "demo_mode": True,
-        "warning": "DEMO REŽIM – zobrazená data jsou simulovaná, nejde o skutečnou satelitní analýzu.",
+        "warning": "Demo mode: these values are simulated and are not a real satellite analysis.",
         "pond_id": pond["pond_id"],
         "pond_name": pond["name"],
         "municipality": pond["municipality"],
@@ -120,10 +122,10 @@ def generate_demo_analysis(pond_id: str, date_from: str | None = None, date_to: 
         "date_to": end_day.isoformat(),
         "source": "Sentinel-2 demo dataset",
         "quality_summary": {
-            "data_quality": "dobrá",
+            "data_quality": "simulated",
             "valid_pixels": int(sum(item["valid_pixels"] for item in timeseries) / max(len(timeseries), 1)),
-            "reliability": "střední až dobrá pro větší rybník",
-            "limitations": "Nízké rozlišení a simulovaná data neodrážejí skutečnou chemickou kvalitu vody.",
+            "reliability": "illustrative only",
+            "limitations": "Simulated values do not reflect actual water conditions or chemical quality.",
         },
         "metrics": {
             "average_ndwi": average_ndwi,
@@ -141,8 +143,14 @@ def generate_demo_analysis(pond_id: str, date_from: str | None = None, date_to: 
         },
         "ice": {
             "status": "not_available",
-            "message": "Pro demo režim nejsou k dispozici simulovaná data zalednění.",
+            "message": "No simulated ice observations are available in demo mode.",
         },
+        "report": (
+            "## Demo report\n\n"
+            "These sample values are simulated and do not describe real conditions. "
+            "They are shown only to demonstrate the app. No ice observations or "
+            "laboratory water-quality measurements are available in demo mode."
+        ),
     }
 
 
@@ -150,17 +158,17 @@ def generate_demo_algae_bloom(pond_id: str, date_from: str | None = None, date_t
     base = generate_demo_analysis(pond_id, date_from, date_to)
     ndci = base["metrics"]["average_ndci"]
     if ndci > 0.2:
-        category = "Zvýšená algální biomasa"
+        category = "Elevated algae-related signal"
     elif ndci > 0.1:
-        category = "Bez výrazné změny"
+        category = "No strong change detected"
     else:
-        category = "Bez výrazné změny"
+        category = "No strong change detected"
 
     return {
         "status": "demo",
         "source": "simulated",
         "ndci_trend": base["timeseries"],
         "category": category,
-        "interpretation": "Jedná se o experimentální orientační indikaci. NDCI neodhaluje koncentraci cyanotoxinů ani konkrétní druhy sinic.",
+        "interpretation": "This is a simulated screening result. NDCI does not identify cyanotoxin concentrations or specific cyanobacteria.",
         "quality": base["quality_summary"],
     }

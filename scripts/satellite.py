@@ -30,7 +30,7 @@ def _get_copernicus_token() -> str:
     client_id = config.get("CDSE_CLIENT_ID")
     client_secret = config.get("CDSE_CLIENT_SECRET")
     if not (token_url and client_id and client_secret):
-        raise ValueError("Copernicus přihlašovací údaje chybí.")
+        raise ValueError("Copernicus credentials are missing.")
     if TOKEN_CACHE["token"] and _now_epoch() < TOKEN_CACHE["expires_at"]:
         return TOKEN_CACHE["token"]
 
@@ -44,7 +44,7 @@ def _get_copernicus_token() -> str:
     data = response.json()
     access_token = data.get("access_token")
     if not access_token:
-        raise ValueError("Copernicus OAuth nepřinesl access token.")
+        raise ValueError("Copernicus OAuth did not return an access token.")
     expires_in = int(data.get("expires_in", 3600))
     TOKEN_CACHE["token"] = access_token
     TOKEN_CACHE["expires_at"] = _now_epoch() + max(expires_in - 60, 30)
@@ -84,7 +84,7 @@ def _sentinel_hub_statistics(geometry: dict[str, Any], date_from: str, date_to: 
     try:
         return response.json()
     except ValueError:
-        return {"error": "Neplatná odpověď Sentinel Hub API"}
+        return {"error": "Invalid response from the Sentinel Hub API"}
 
 
 def _as_utc_datetime(value: str, end_of_day: bool) -> str:
@@ -137,13 +137,13 @@ def _project_coordinates(coordinates: Any) -> Any:
         return [x, y, *coordinates[2:]]
     if isinstance(coordinates, (list, tuple)):
         return [_project_coordinates(part) for part in coordinates]
-    raise ValueError("Geometrie rybníka má neplatný formát souřadnic.")
+    raise ValueError("Water-body geometry has invalid coordinates.")
 
 
 def _project_geometry(geometry: dict[str, Any]) -> dict[str, Any]:
     coordinates = geometry.get("coordinates")
     if not isinstance(coordinates, (list, tuple)):
-        raise ValueError("Geometrie rybníka neobsahuje platné souřadnice.")
+        raise ValueError("Water-body geometry does not contain valid coordinates.")
     return {**geometry, "coordinates": _project_coordinates(coordinates)}
 
 
@@ -161,9 +161,9 @@ def _extract_time_series(payload: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         date_from_value = interval.get("from") if isinstance(interval, dict) else None
         date_to_value = interval.get("to") if isinstance(interval, dict) else None
-        band_stats = [((bands.get(f"B{index}") or {}).get("stats") or {}) for index in range(4)]
+        band_stats = [((bands.get(f"B{index}") or {}).get("stats") or {}) for index in range(5)]
         means = [_as_float(stat.get("mean")) for stat in band_stats]
-        ndwi, ndti, ndci, water_share = means
+        ndwi, ndti, ndci, water_share, ice_share = means
         sample_count = _as_float(band_stats[0].get("sampleCount"))
         no_data_count = _as_float(band_stats[0].get("noDataCount"))
         valid_pixels = (
@@ -180,11 +180,64 @@ def _extract_time_series(payload: dict[str, Any]) -> list[dict[str, Any]]:
                 "ndci": round(ndci, 3) if ndci is not None else None,
                 "ndci_median": round(ndci_median, 3) if ndci_median is not None else None,
                 "water_percent": round(water_share * 100, 2) if water_share is not None and valid_pixels else None,
+                "ice_percent": round(ice_share * 100, 2) if ice_share is not None and valid_pixels else None,
                 "valid_pixels": valid_pixels,
-                "quality": "nízká spolehlivost" if valid_pixels is not None and valid_pixels < 10 else "zjištěno",
+                "quality": "low confidence" if valid_pixels is not None and valid_pixels < 10 else "observed",
             }
         )
     return series
+
+
+def analyze_ice(timeseries: list[dict[str, Any]]) -> dict[str, Any]:
+    usable_intervals = 0
+    detections: list[dict[str, Any]] = []
+    for item in timeseries:
+        valid_pixels = item.get("valid_pixels")
+        ice_percent = item.get("ice_percent")
+        if (
+            not isinstance(valid_pixels, int)
+            or valid_pixels < 10
+            or not isinstance(ice_percent, (int, float))
+        ):
+            item["ice_status"] = "inconclusive"
+            continue
+
+        usable_intervals += 1
+        ice_pixels = round(valid_pixels * ice_percent / 100)
+        if ice_percent >= 15 and ice_pixels >= 2:
+            item["ice_status"] = "possible_ice"
+            detections.append(
+                {
+                    "date": item.get("date"),
+                    "ice_percent": ice_percent,
+                    "valid_pixels": valid_pixels,
+                }
+            )
+        elif ice_pixels == 0:
+            item["ice_status"] = "no_ice_detected"
+        else:
+            item["ice_status"] = "inconclusive"
+
+    status = (
+        "possible_ice"
+        if detections
+        else "no_ice_detected"
+        if usable_intervals
+        else "inconclusive"
+    )
+    return {
+        "status": status,
+        "source": "Sentinel-2 Scene Classification Layer (snow/ice class)",
+        "observations": detections,
+        "usable_intervals": usable_intervals,
+        "limitations": (
+            "This is a satellite screening for pixels classified as snow or ice, "
+            "not a direct confirmation that the water surface was frozen. "
+            "Clouds, mixed shore pixels, and the 20 m classification resolution "
+            "can limit reliability. An interval is flagged only with at least 10 "
+            "valid pixels, 15% classified snow/ice, and at least 2 classified pixels."
+        ),
+    }
 
 
 def _sentinel2_evalscript() -> str:
@@ -194,7 +247,7 @@ def _sentinel2_evalscript() -> str:
       return {
         input: [{bands: ["B03", "B04", "B08", "B05", "SCL", "dataMask"]}],
         output: [
-          {id: "indices", bands: 4, sampleType: "FLOAT32"},
+          {id: "indices", bands: 5, sampleType: "FLOAT32"},
           {id: "dataMask", bands: 1}
         ]
       };
@@ -203,12 +256,13 @@ def _sentinel2_evalscript() -> str:
       let ndwiSum = samples.B03 + samples.B08;
       let ndtiSum = samples.B04 + samples.B03;
       let ndciSum = samples.B05 + samples.B04;
-      let valid = samples.dataMask === 1 && samples.SCL !== 3 && samples.SCL !== 8 && samples.SCL !== 9 && samples.SCL !== 10 && samples.SCL !== 11;
+      let valid = samples.dataMask === 1 && samples.SCL !== 3 && samples.SCL !== 8 && samples.SCL !== 9 && samples.SCL !== 10;
       let ndwi = ndwiSum !== 0 ? (samples.B03 - samples.B08) / ndwiSum : 0;
       let ndti = ndtiSum !== 0 ? (samples.B04 - samples.B03) / ndtiSum : 0;
       let ndci = ndciSum !== 0 ? (samples.B05 - samples.B04) / ndciSum : 0;
+      let possibleIce = samples.SCL === 11 ? 1 : 0;
       return {
-        indices: [ndwi, ndti, ndci, ndwi > 0 ? 1 : 0],
+        indices: [ndwi, ndti, ndci, ndwi > 0 ? 1 : 0, possibleIce],
         dataMask: [valid && ndwiSum !== 0 && ndtiSum !== 0 && ndciSum !== 0 ? 1 : 0]
       };
     }
@@ -218,14 +272,14 @@ def _sentinel2_evalscript() -> str:
 def analyze_pond(pond_id: str, date_from: str, date_to: str) -> dict[str, Any]:
     pond = get_pond_by_id(pond_id)
     if not pond:
-        return {"status": "not_available", "message": "Rybník nebyl nalezen nebo není dostupný pro analýzu."}
+        return {"status": "not_available", "message": "Water body was not found or is unavailable for analysis."}
 
     if not has_real_copernicus():
         return demo_data.generate_demo_analysis(pond_id, date_from, date_to)
 
     geometry = pond.get("geometry")
     if not geometry:
-        return {"status": "not_available", "message": "Pro daný rybník není k dispozici polygon pro analýzu."}
+        return {"status": "not_available", "message": "No polygon is available for this water body."}
 
     try:
         projected_geometry = _project_geometry(geometry)
@@ -235,11 +289,12 @@ def analyze_pond(pond_id: str, date_from: str, date_to: str) -> dict[str, Any]:
     except (requests.RequestException, ValueError) as exc:
         return {
             "status": "error",
-            "message": f"Sentinel Hub nevrátil očekávaná data: {exc}",
-            "quality_summary": {"data_quality": "nedostupná", "reliability": "nízká", "limitations": "Chyba při přístupu ke Sentinel Hub."},
+            "message": f"Sentinel Hub did not return the expected data: {exc}",
+            "quality_summary": {"data_quality": "unavailable", "reliability": "low", "limitations": "Sentinel Hub access failed."},
         }
 
     timeseries = _extract_time_series(api_response)
+    ice = analyze_ice(timeseries)
     metrics = {
         "average_ndwi": round(sum(item["ndwi"] for item in timeseries if item.get("ndwi") is not None) / max(1, len([item for item in timeseries if item.get("ndwi") is not None])), 3) if timeseries else None,
         "average_ndti": round(sum(item["ndti"] for item in timeseries if item.get("ndti") is not None) / max(1, len([item for item in timeseries if item.get("ndti") is not None])), 3) if timeseries else None,
@@ -249,23 +304,24 @@ def analyze_pond(pond_id: str, date_from: str, date_to: str) -> dict[str, Any]:
     valid_pixel_count = sum(item["valid_pixels"] for item in timeseries if item.get("valid_pixels") is not None) if timeseries else 0
     low_confidence = valid_pixel_count < 10
     quality = {
-        "data_quality": "nedostatečný počet validních pixelů" if low_confidence and timeseries else "částečně dostupná" if timeseries else "nedostupná",
+        "data_quality": "too few valid pixels" if low_confidence and timeseries else "partially available" if timeseries else "unavailable",
         "valid_pixels": valid_pixel_count,
-        "reliability": "nízká" if low_confidence else "střední",
-        "limitations": "Nedostatečné pokrytí nebo nízká validita dat může ovlivnit spolehlivost odhadu.",
+        "reliability": "low" if low_confidence else "medium",
+        "limitations": "Limited coverage or few valid pixels may reduce estimate reliability.",
     }
     return {
         "status": "ok",
         "pond_id": pond["pond_id"],
         "pond_name": pond["name"],
-        "municipality": pond.get("municipality", "neznámá"),
+        "municipality": pond.get("municipality", "unknown"),
         "date_from": date_from,
         "date_to": date_to,
         "source": "Copernicus Sentinel-2 (Statistical API)",
         "metrics": metrics,
         "quality_summary": quality,
         "timeseries": timeseries,
-        "warning": "NDWI a NDTI jsou orientační satelitní indikátory. Nevypovídají o přímé chemické nebo mikrobiologické kvalitě vody.",
+        "ice": ice,
+        "warning": "NDWI, NDTI, and NDCI are satellite screening indicators, not direct measurements of chemical or microbiological water quality.",
         "ndwi_threshold": DEFAULT_NDWI_THRESHOLD,
     }
 
@@ -279,8 +335,8 @@ def analyze_algae_bloom(pond_id: str, date_from: str, date_to: str) -> dict[str,
         return {
             "status": "not_available",
             "source": "sentinel-2",
-            "category": "Nedostatek dat",
-            "interpretation": "Pro dané období nebyly k dispozici dostatečné satelitní údaje pro experimentální posouzení algální biomasy.",
+            "category": "Insufficient data",
+            "interpretation": "There were not enough satellite observations in this period for an algae screening.",
             "quality": analysis.get("quality_summary", {}),
         }
 
@@ -290,23 +346,23 @@ def analyze_algae_bloom(pond_id: str, date_from: str, date_to: str) -> dict[str,
             "status": "not_available",
             "source": "Sentinel-2 NDCI",
             "ndci_trend": analysis.get("timeseries", []),
-            "category": "Nedostatek dat",
-            "interpretation": "Počet platných pixelů je příliš nízký pro spolehlivou indikaci algální biomasy.",
+            "category": "Insufficient data",
+            "interpretation": "There were too few valid pixels for a reliable algae screening.",
             "quality": analysis.get("quality_summary", {}),
         }
     mean_ndci = sum(ndci_values) / max(len(ndci_values), 1)
     if mean_ndci > 0.24:
-        category = "Možný signál vodního květu"
+        category = "Possible algae-bloom signal"
     elif mean_ndci > 0.18:
-        category = "Zvýšená algální biomasa"
+        category = "Elevated algae-related signal"
     else:
-        category = "Bez výrazné změny"
+        category = "No strong change detected"
 
     return {
         "status": "ok",
         "source": "Sentinel-2 NDCI",
         "ndci_trend": analysis.get("timeseries", []),
         "category": category,
-        "interpretation": "NDCI je orientační indikátor chlorofylu-a a fytoplanktonové biomasy. Nepředstavuje přímé potvrzení sinic, cyanotoxinů ani infekčních agens.",
+        "interpretation": "NDCI is a rough indicator related to chlorophyll-a and phytoplankton biomass. It does not confirm cyanobacteria, toxins, or pathogens.",
         "quality": analysis.get("quality_summary", {}),
     }

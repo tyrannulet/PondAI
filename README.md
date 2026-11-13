@@ -1,107 +1,101 @@
 # PondWatch AI
 
-PondWatch AI je jednoduchá MVP aplikace pro monitoring českých rybníků ze satelitních dat. Aplikace umí rozpoznat obec a rybník z přirozeného českého dotazu, vyhledat kandidáty v geodatabázích RÚIAN a ZABAGED, zpracovat satelitní signály (NDWI, NDTI a NDCI) a prezentovat výsledky v grafu, tabulce a mapě. Celé rozhraní je v češtině a v demo režimu funguje i bez API klíčů.
+PondWatch AI is a Streamlit app for exploring Czech ponds, reservoirs, and other mapped water bodies using satellite data. It accepts natural-language requests in English or Czech, searches RÚIAN and ZABAGED, and provides a plain-language report by default. Charts and measurement tables are optional.
 
-## Co aplikace dělá
+## Features
 
-- rozumí přirozenému českému požadavku,
-- hledá obec a rybník v ní,
-- analyzuje vodní plochu, optické indikátory vody a biologickou kvalitu,
-- zobrazuje výsledky v Streamlit dashboardu,
-- používá Featherless AI pro základní agentní logiku a tool calling,
-- umožňuje demo režim s realisticky vypadajícími simulovanými daty.
+- Search ponds, reservoirs, lakes, or all mapped water bodies in a Czech municipality.
+- Analyze Sentinel-2 water-surface and optical indicators (NDWI, NDTI, and NDCI).
+- Screen for possible ice or snow using Sentinel-2 scene classification. This is not confirmation that a water surface was frozen.
+- Select among multiple candidates using a map and a descriptive list.
+- Use Featherless AI for request interpretation and tool calling.
+- Run in demo mode with simulated values when API credentials are unavailable.
 
-## Architektura agenta
+## Agent architecture
 
-Aplikace je navržena jako jednoduchý MVP bez zbytečných služeb:
+- `scripts/config.py` loads configuration from `api/` and checks for placeholders.
+- `scripts/geo_sources.py` searches municipalities and water bodies through RÚIAN and ZABAGED.
+- `scripts/satellite.py` analyzes Sentinel-2 data and provides algae and possible-ice screening.
+- `scripts/agent.py` interprets requests and calls `find_ponds()` and `analyze_pond()`.
+- `scripts/app.py` renders the Streamlit interface.
+- `scripts/demo_data.py` provides simulated values when real API credentials are unavailable.
 
-- `scripts/config.py` načítá konfigurační soubory z `api/` a kontroluje placeholdery.
-- `scripts/geo_sources.py` vyhledává obce a rybníky přes RÚIAN a ZABAGED.
-- `scripts/satellite.py` připravuje analýzu Sentinel-2 a experimentální indikaci algální biomasy.
-- `scripts/agent.py` interpretuje přirozený prompt a volá lokalní nástroje `find_ponds()` a `analyze_pond()`.
-- `scripts/app.py` zobrazuje UI v Streamlit.
-- `scripts/demo_data.py` poskytuje simulovaná data, pokud chybí skutečné API klíče.
+## Install dependencies
 
-## Instalace závislostí
-
-1. Vytvořte virtuální prostředí:
+1. Create a virtual environment:
 
 ```bash
 python -m venv .venv
 ```
 
-2. Aktivujte prostředí:
+2. Activate it:
 
 ```bash
 .venv\Scripts\activate
 ```
 
-3. Nainstalujte závislosti:
+3. Install dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-## Kde získat API klíče
+## Getting API credentials
 
 ### Featherless
-- Otevřete: https://featherless.ai
-- Vytvořte účet a API klíč
-- Použijte model `Qwen/Qwen3-32B`
+- Visit https://featherless.ai.
+- Create an account and API key.
+- Use the `Qwen/Qwen3-32B` model.
 
 ### Copernicus / Sentinel Hub
-- Otevřete: https://dataspace.copernicus.eu/
-- Vytvořte účet a získejte `Client ID` a `Client Secret`
-- Poté přidejte údaje do souboru `api/copernicus.txt`
+- Visit https://dataspace.copernicus.eu/.
+- Create an account and obtain a `Client ID` and `Client Secret`.
+- Add the credentials to `api/copernicus.txt`.
 
-## Kam doplnit klíče
+## Where to add credentials
 
 - `api/featherless.txt`
 - `api/copernicus.txt`
 
-Přepíše se do proměnných prostředí, pokud je aplikace spouští. Při konfiguraci nesmí být ve hodnotách placeholdery začínající na `PASTE_`.
+Environment variables override values from these files. Placeholder values beginning with `PASTE_` are not treated as valid credentials.
 
-## Spuštění aplikace
+## Run the app
 
-Z kořenové složky projektu spusťte:
+From the project root, run:
 
 ```bash
 streamlit run scripts/app.py
 ```
 
-## Ovládání aplikace
+## Using the app
 
-- Zadejte přirozený dotaz ve větě, například:
-  - „Analyzuj rybník v Řitce za celý rok 2025.“
-  - „Jaké jsou optické indikátory vody pro rybník v Řitce?“
-- Aplikace rozpozná obec, rybník a časové období.
-- Pokud je nalezeno více kandidátů, vyberte konkrétní rybník.
-- Výsledky se zobrazí v grafu, mapě a tabulce.
+- Enter a natural-language request, for example:
+  - “Analyze the ponds in Řitka for 2025.”
+  - “Find reservoirs in Prague.”
+  - “Show charts for this analysis.”
+- The app identifies the municipality, water-body type, and date range.
+- If multiple candidates are found, select one from the map and list.
+- A plain-language report is shown by default; opt into charts and measurements using the checkbox or by asking for charts.
 
-## Demo režim
+## Demo mode
 
-Pokud nejsou nastavena skutečná API data, aplikace se spustí v demo režimu:
+If real API credentials are unavailable, the app starts in demo mode:
 
-- zobrazuje se varování „DEMO REŽIM – zobrazená data jsou simulovaná, nejde o skutečnou satelitní analýzu“,
-- grafy a mapa se načtou z realistických simulovaných dat,
-- aplikace nevolá žádné skutečné API s falešnými klíči,
-- výsledky jsou označené jako demonstrační a ne jako skutečné měření.
+- A warning identifies simulated values; they are not a real satellite analysis.
+- The app does not call APIs with fake credentials.
+- Demo data do not include ice observations or laboratory water-quality measurements.
 
-## Bezpečnost a správnost výsledků
+## Interpreting results
 
-- NDWI slouží k odhadu vodní plochy a orientaci při zobrazení vody.
-- NDTI je orientační indikátor optických změn souvisejících s suspendovanými látkami.
-- NDCI je experimentální indikátor chlorofylu-a a fytoplanktonové biomasy.
-- NDCI a NDTI nikdy neznamenají přímé laboratorní měření ani potvrzení cyanotoxinů, patogenů nebo chemické bezpečnosti vody.
-- Všechny výsledky je třeba interpretovat jako satelitní screening, nikoli jako zdravotní závěr.
+- NDWI is a spectral indicator of water; classified pixel share is not water depth or volume.
+- NDTI and NDCI are optical screening indicators, not laboratory measurements.
+- The snow/ice class can flag possible surface ice, but cannot confirm that a water body was frozen.
+- Treat all satellite-derived results as screening, not as a health or water-safety assessment.
 
-## Rozšíření projektu
+## Windows launcher
 
-PondWatch AI je navržen tak, aby bylo snadné rozšířit o další analýzu biologické kvality vody, zalednění a zlepšené AI interpretace beze změny základní jednoduché architektury.
-## Spuštění aplikace ve Windows
+1. Double-click `Spustit PondWatch.bat`.
+2. On first run, the script installs missing dependencies from `requirements.txt`.
+3. The app opens at [http://localhost:8502](http://localhost:8502). Keep the terminal window open while using the app; closing it stops the server.
 
-1. Dvakrát klikněte na `Spustit PondWatch.bat`.
-2. Při prvním spuštění skript nainstaluje chybějící závislosti z `requirements.txt`.
-3. Otevře se aplikace v prohlížeči na [http://localhost:8502](http://localhost:8502). Okno terminálu ponechte otevřené, dokud aplikaci používáte; zavřením ji ukončíte.
-
-Skript vyžaduje nainstalovaný Python 3 a spouští se ze složky projektu.
+Python 3 must be installed.

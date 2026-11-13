@@ -40,12 +40,12 @@ class ChartInterpretationTests(unittest.TestCase):
             ],
         }
         self.algae = {
-            "category": "Zvýšená algální biomasa",
-            "interpretation": "Orientační screening.",
+            "category": "Elevated algae-related signal",
+            "interpretation": "Satellite screening only.",
             "ndci_trend": self.analysis["timeseries"],
         }
         self.pond = {
-            "name": "Testovací rybník",
+            "name": "Test pond",
             "municipality": "Řitka",
             "area_m2": 5000,
         }
@@ -56,12 +56,12 @@ class ChartInterpretationTests(unittest.TestCase):
                 self.pond, self.analysis, self.algae
             )
 
-        self.assertIn("podíl klasifikovaných pixelů", interpretation)
+        self.assertIn("mapped boundary", interpretation)
         self.assertIn("NDWI", interpretation)
         self.assertIn("NDTI", interpretation)
         self.assertIn("NDCI", interpretation)
-        self.assertIn("1 z 3", interpretation)
-        self.assertIn("20 na 40", interpretation)
+        self.assertIn("1 of 3", interpretation)
+        self.assertIn("20 to 40", interpretation)
 
     def test_model_receives_geospatial_context_and_all_chart_data(self):
         completion = SimpleNamespace(
@@ -69,8 +69,9 @@ class ChartInterpretationTests(unittest.TestCase):
                 SimpleNamespace(
                     message=SimpleNamespace(
                         content=(
-                            "Podíl vodních pixelů roste. NDWI roste. "
-                            "NDTI je stabilní. NDCI je stabilní."
+                            "Water-pixel share increases. NDWI increases. "
+                            "NDTI is stable. NDCI is stable. "
+                            "Possible snow/ice classification: none observed."
                         )
                     )
                 )
@@ -98,9 +99,9 @@ class ChartInterpretationTests(unittest.TestCase):
                 self.pond, self.analysis, self.algae
             )
 
-        self.assertIn("Podíl vodních pixelů", result)
+        self.assertIn("Water-pixel share", result)
         prompt = create_completion.call_args.kwargs
-        self.assertIn("10m pixely", prompt["messages"][0]["content"])
+        self.assertIn("10 m pixels", prompt["messages"][0]["content"])
         self.assertFalse(
             prompt["extra_body"]["chat_template_kwargs"]["enable_thinking"]
         )
@@ -115,7 +116,7 @@ class ChartInterpretationTests(unittest.TestCase):
         completion = SimpleNamespace(
             choices=[
                 SimpleNamespace(
-                    message=SimpleNamespace(content="Podíl vodních pixelů se zvýšil.")
+                    message=SimpleNamespace(content="Water-pixel share increased.")
                 )
             ]
         )
@@ -137,7 +138,7 @@ class ChartInterpretationTests(unittest.TestCase):
                 self.pond, self.analysis, self.algae
             )
 
-        self.assertIn("interpretaci grafů", result)
+        self.assertIn("chart interpretation", result)
         self.assertIn("NDWI", result)
         self.assertIn("NDTI", result)
         self.assertIn("NDCI", result)
@@ -148,8 +149,8 @@ class ChartInterpretationTests(unittest.TestCase):
                 SimpleNamespace(
                     message=SimpleNamespace(
                         content=(
-                            "Podíl vodních pixelů může naznačovat změnu. "
-                            "NDWI stabilní. NDTI stabilní. NDCI stabilní."
+                            "Water-pixel share may suggest a change. "
+                            "NDWI stable. NDTI stable. NDCI stable."
                         )
                     )
                 )
@@ -173,14 +174,14 @@ class ChartInterpretationTests(unittest.TestCase):
                 self.pond, self.analysis, self.algae
             )
 
-        self.assertIn("opatrnou interpretaci", result)
+        self.assertIn("insufficiently cautious", result)
         self.assertIn("NDWI", result)
         self.assertIn("NDTI", result)
         self.assertIn("NDCI", result)
-        self.assertIn("podíl klasifikovaných pixelů", result)
+        self.assertIn("mapped boundary", result)
 
-    def test_analysis_response_ends_with_graph_interpretation(self):
-        interpretation = "Interpretace všech čtyř grafů."
+    def test_analysis_report_is_plain_language_and_charts_are_opt_in(self):
+        interpretation = "Interpretation of all four charts."
         with (
             patch.object(
                 agent,
@@ -208,7 +209,70 @@ class ChartInterpretationTests(unittest.TestCase):
                 {**self.pond, "pond_id": "test-pond"},
                 "2025-01-01",
                 "2025-01-20",
+                include_charts=True,
             )
 
-        self.assertTrue(result["response"].endswith(interpretation))
+        self.assertIn("Satellite report", result["response"])
         self.assertEqual(result["analysis"]["graph_interpretation"], interpretation)
+        self.assertEqual(result["analysis"]["report"], result["response"])
+
+    def test_plain_language_report_explains_satellite_quality_limits(self):
+        report = agent._plain_language_report(
+            self.pond,
+            {
+                "date_from": "2025-01-01",
+                "date_to": "2025-01-20",
+                "timeseries": self.analysis["timeseries"],
+                "ice": {"status": "no_ice_detected", "usable_intervals": 2},
+            },
+            {"category": "No strong change detected"},
+        )
+
+        self.assertIn("20% to 40%", report)
+        self.assertIn("not water depth or volume", report)
+        self.assertIn("does not prove that the water never froze", report)
+        self.assertIn("laboratory", report)
+
+    def test_charts_are_not_interpreted_until_requested(self):
+        with (
+            patch.object(
+                agent,
+                "analyze_pond",
+                return_value={
+                    "date_from": "2025-01-01",
+                    "date_to": "2025-01-20",
+                    "timeseries": [],
+                    "warning": "",
+                },
+            ),
+            patch.object(agent, "analyze_algae_bloom", return_value={}),
+            patch.object(agent, "_interpret_analysis_charts") as interpret_charts,
+        ):
+            result = agent._analyze_selected_pond(
+                {**self.pond, "pond_id": "test-pond"},
+                "2025-01-01",
+                "2025-01-20",
+            )
+
+        interpret_charts.assert_not_called()
+        self.assertIsNone(result["analysis"]["graph_interpretation"])
+        self.assertIn("Satellite report", result["response"])
+
+    def test_report_compares_monthly_algae_related_signals(self):
+        report = agent._plain_language_report(
+            self.pond,
+            {
+                "date_from": "2025-01-01",
+                "date_to": "2025-02-20",
+                "timeseries": [
+                    {"date": "2025-01-10", "ndci": 0.1},
+                    {"date": "2025-02-10", "ndci": 0.4},
+                ],
+                "ice": {"status": "inconclusive"},
+            },
+            {"category": "Elevated algae-related signal"},
+        )
+
+        self.assertIn("lower in January 2025", report)
+        self.assertIn("higher in February 2025", report)
+        self.assertIn("not by itself proof of poorer water quality", report)
