@@ -14,6 +14,8 @@ from scripts.geo_sources import find_ponds
 from scripts.satellite import analyze_algae_bloom, analyze_pond
 
 MUNICIPALITY_ALIASES = {
+    "praze": "Praha",
+    "mníšku pod brdy": "Mníšek pod Brdy",
     "valmez": "Valašské Meziříčí",
     "valmezu": "Valašské Meziříčí",
     "valašském meziříčí": "Valašské Meziříčí",
@@ -134,6 +136,7 @@ def _normalize_municipality_with_featherless(prompt: str) -> str | None:
 def _extract_municipality(prompt: str) -> str | None:
     stop_words = r"(?:a|za|od|do|pro|během|roce|roku|poslední|minulý|minulém|celý|celou)"
     patterns = [
+        rf"\b(?:v|ve)\s+(?:městě|obci)\s+([A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽa-záčďéěíňóřšťúůýž\s-]+?)(?=\s+{stop_words}\b|[,;.!?]|$)",
         rf"\b(?:v|ve)\s+([A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽa-záčďéěíňóřšťúůýž\s-]+?)(?=\s+{stop_words}\b|\s+(?:v|ve)\s+(?:roce|roku)\b|[,;.!?]|$)",
         rf"\b(?:obec|město|městě)\s+([A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽa-záčďéěíňóřšťúůýž\s-]+?)(?=\s+{stop_words}\b|[,;.!?]|$)",
     ]
@@ -147,10 +150,34 @@ def _extract_municipality(prompt: str) -> str | None:
 
 
 def _extract_pond_name(prompt: str) -> str | None:
-    match = re.search(r"rybník(?:\s+u\s+)?(?:s\s+názvem\s+|nazvan(?:ý|ém|ého)?\s+|\s+)([A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽa-záčďéěíňóřšťúůýž\s-]+?)(?:\s+v\s+|\s+za\b|\.|\?|!|$)", prompt, flags=re.IGNORECASE)
+    name_pattern = (
+        r"([A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽa-záčďéěíňóřšťúůýž\s-]+?)"
+        r"(?=\s+(?:v|ve|u|a|za|od|do|pro|během|roce|roku|analyzuj|analyzovat)\b"
+        r"|[,;.!?]|$)"
+    )
+    match = re.search(
+        rf"\brybník(?:u|a)?\s+(?:s\s+názvem\s+|nazvan(?:ý|ém|ého)?\s+){name_pattern}",
+        prompt,
+        flags=re.IGNORECASE,
+    )
+    if not match:
+        match = re.search(
+            rf"\brybník(?:u|a)?\s+(?!v\b|ve\b|u\b|a\b|na\b|podle\b|městě\b|obci\b){name_pattern}",
+            prompt,
+            flags=re.IGNORECASE,
+        )
     if match:
-        return match.group(1).strip()
+        name = match.group(1).strip()
+        return name or None
     return None
+
+
+def _is_broad_pond_search(prompt: str) -> bool:
+    lowered = prompt.casefold()
+    return bool(
+        re.search(r"\b(?:všechny|všech|každé|každý)\b", lowered)
+        or re.search(r"\brybník(?:y|ů|ům|ech)\b", lowered)
+    )
 
 
 def _dispatch_tool(function_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -555,6 +582,21 @@ def run_agent(prompt: str, state: dict[str, Any] | None = None) -> dict[str, Any
         if normalized_municipality:
             municipality = normalized_municipality
 
+    previous_municipality = state.get("last_municipality")
+    municipality_changed = bool(
+        municipality
+        and previous_municipality
+        and _canonicalize_municipality(municipality).casefold()
+        != _canonicalize_municipality(previous_municipality).casefold()
+    )
+    if municipality_changed or _is_broad_pond_search(prompt):
+        state["selected_pond"] = None
+        state["pending_candidates"] = None
+        state["pending_ponds"] = None
+        state["last_pond_name"] = None
+        state["last_date_from"] = None
+        state["last_date_to"] = None
+
     if has_real_featherless() and not is_pond_choice:
         try:
             ai_result = _call_featherless_tools(
@@ -565,7 +607,9 @@ def run_agent(prompt: str, state: dict[str, Any] | None = None) -> dict[str, Any
         except Exception:
             pass
 
-    pond_name = _extract_pond_name(prompt) or state.get("last_pond_name")
+    pond_name = _extract_pond_name(prompt)
+    if pond_name is None:
+        pond_name = state.get("last_pond_name")
     date_from, date_to = _extract_date_range(prompt)
     if date_from and date_to:
         state["last_date_from"] = date_from

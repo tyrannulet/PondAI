@@ -74,3 +74,11 @@ Záznam významných změn a důvodů jejich provedení. Při dalších úpravá
 - Živý test Qwen3 odhalil, že výchozí režim přemýšlení spotřeboval limit odpovědi a vracel useknutý text. Pro interpretaci je vypnut přes `chat_template_kwargs.enable_thinking=false`, limit odpovědi zvýšen a neúplný výstup se odmítne ve prospěch úplného datového shrnutí.
 - Upřesněno rozlišení mezi 0 % při kladném počtu validních pixelů a chybějícími daty; model nesmí vysvětlovat konkrétní trendy nepodloženými příčinami.
 - Do kontextu modelu jsou přidány předpočítané přesné rozsahy a směry. Neúplný nebo spekulativní výstup se nahrazuje datovým shrnutím všech grafů. Živý test Qwen3 vrátil čtyři dokončené části pro vodní podíl, NDWI, NDTI a NDCI.
+
+## 2026-11-13 — oprava filtrů při hledání rybníků
+
+- Příčina falešných výsledků „nenalezen žádný rybník“: stav chatu přenášel název rybníka z předchozího hledání do nové obce, takže ZABAGED výsledky odfiltroval podle starého názvu. Při novém městě nebo požadavku na více/všechny rybníky se nyní ruší starý výběr, filtr i období.
+- Parser názvu rybníka zaměňoval větu „rybník ve městě Řitka“ za filtr s názvem „ve městě Řitka“. Rozpoznává nyní jen skutečný název po slově „rybník“ a nepovažuje množné „rybníky“ za jméno; výslovný název (např. „rybník Brčálník v Řitce“) zůstává podporován.
+- Doplněny lokální převody „v Praze“ → „Praha“, „v Mníšku pod Brdy“ → „Mníšek pod Brdy“ a rozpoznání „ve městě Řitka“ i bez AI.
+- Živě ověřeny všechny tři hlášené dotazy bez Featherless: Praha vrací 245 kandidátů, Mníšek pod Brdy 18 a Řitka 2. U všech je filtr rybníka `None`; rok 2025 se zachová u dotazů, které jej obsahují.
+- Přidány regresní testy parseru, výběru obce a zrušení starého filtru při nové lokalitě.
