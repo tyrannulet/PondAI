@@ -1,7 +1,34 @@
 import unittest
 from unittest.mock import patch
+from shapely.geometry import Point, shape
 
-from scripts.geo_sources import find_ponds
+from scripts.geo_sources import _approximate_location, _normalise_geometry, find_ponds, get_pond_by_id
+
+
+class GeometryTests(unittest.TestCase):
+    def test_disjoint_arcgis_rings_and_holes_keep_their_areas(self):
+        outer = [[0, 0], [0, 6], [6, 6], [6, 0], [0, 0]]
+        hole = [[1, 1], [5, 1], [5, 5], [1, 5], [1, 1]]
+        second = [[10, 0], [10, 2], [12, 2], [12, 0], [10, 0]]
+        geometry = _normalise_geometry({"rings": [hole, second, outer]})
+        self.assertEqual(geometry["type"], "MultiPolygon")
+        self.assertTrue(shape(geometry).is_valid)
+        self.assertEqual(shape(geometry).area, 24)
+        location = _approximate_location(geometry)
+        self.assertTrue(shape(geometry).contains(Point(location["longitude"], location["latitude"])))
+
+    def test_marker_does_not_fall_in_a_polygon_hole(self):
+        geometry = {"type": "Polygon", "coordinates": [
+            [[0, 0], [6, 0], [6, 6], [0, 6], [0, 0]],
+            [[1, 1], [1, 5], [5, 5], [5, 1], [1, 1]],
+        ]}
+        location = _approximate_location(geometry)
+        self.assertTrue(shape(geometry).contains(Point(location["longitude"], location["latitude"])))
+
+    def test_pond_id_is_escaped_in_arcgis_query(self):
+        with patch("scripts.geo_sources._call_arcgis", return_value={"features": []}) as query:
+            get_pond_by_id("pond'42")
+        self.assertEqual(query.call_args.args[1]["where"], "fid_zbg = 'pond''42'")
 
 
 class WaterBodySearchTests(unittest.TestCase):

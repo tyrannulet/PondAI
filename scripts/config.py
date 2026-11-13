@@ -34,7 +34,7 @@ def is_placeholder(value: Any) -> bool:
     if value is None:
         return True
     text = str(value).strip()
-    return bool(text) and text.upper().startswith("PASTE_")
+    return not text or text.upper() == "AAAA" or text.upper().startswith("PASTE_")
 
 
 def _load_from_env(namespace: str) -> dict[str, str]:

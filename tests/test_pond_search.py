@@ -5,6 +5,20 @@ from scripts import agent
 
 
 class PondSearchParsingTests(unittest.TestCase):
+    def test_invalid_relative_period_does_not_launch_tools(self):
+        for prompt in ("last 0 months", "last 999999999999 months"):
+            with (
+                self.subTest(prompt=prompt),
+                patch.object(agent, "understand_request", return_value=None),
+                patch.object(agent, "compose_reply", return_value=None),
+                patch.object(agent, "find_ponds") as search,
+                patch.object(agent, "analyze_pond") as analyze,
+            ):
+                result = agent.run_agent(prompt, {})
+                self.assertEqual(result["status"], "awaiting_input")
+                search.assert_not_called()
+                analyze.assert_not_called()
+
     def test_pond_plural_does_not_become_a_pond_name_filter(self):
         prompts = [
             "Zkontrolujte rybníky v Praze v roce 2025",
@@ -61,9 +75,10 @@ class PondSearchParsingTests(unittest.TestCase):
             "last_date_to": "2025-12-31",
         }
         with (
-            patch.object(agent, "has_real_featherless", return_value=True),
-            patch.object(agent, "_normalize_municipality_with_featherless", return_value="Praha"),
-            patch.object(agent, "_call_featherless_tools", return_value={"analysis": None}),
+            patch.object(agent, "understand_request", return_value={
+                "action": "search", "municipality": "Praha",
+            }),
+            patch.object(agent, "compose_reply", return_value="Choose a pond in Prague."),
             patch.object(agent, "find_ponds", return_value=search_result) as find_ponds,
         ):
             result = agent.run_agent("Zkontrolujte rybníky v Praze", state)

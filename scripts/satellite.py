@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime
 import math
 import time
 from typing import Any
@@ -10,6 +9,7 @@ import requests
 
 from scripts import demo_data
 from scripts.config import DEFAULT_NDWI_THRESHOLD, get_copernicus_config, has_real_copernicus
+from scripts.date_utils import validate_date_range
 from scripts.geo_sources import get_pond_by_id
 
 TOKEN_CACHE: dict[str, Any] = {"token": None, "expires_at": 0.0}
@@ -172,6 +172,8 @@ def _extract_time_series(payload: dict[str, Any]) -> list[dict[str, Any]]:
             else None
         )
         ndci_median = _as_float((band_stats[2].get("percentiles") or {}).get("50.0"))
+        if not valid_pixels:
+            ndwi = ndti = ndci = ndci_median = None
         series.append(
             {
                 "date": str(date_from_value or date_to_value or "").split("T")[0],
@@ -190,14 +192,17 @@ def _extract_time_series(payload: dict[str, Any]) -> list[dict[str, Any]]:
 
 def analyze_ice(timeseries: list[dict[str, Any]]) -> dict[str, Any]:
     usable_intervals = 0
+    clear_intervals = 0
     detections: list[dict[str, Any]] = []
     for item in timeseries:
         valid_pixels = item.get("valid_pixels")
         ice_percent = item.get("ice_percent")
         if (
-            not isinstance(valid_pixels, int)
+            type(valid_pixels) is not int
             or valid_pixels < 10
-            or not isinstance(ice_percent, (int, float))
+            or type(ice_percent) not in (int, float)
+            or not math.isfinite(ice_percent)
+            or not 0 <= ice_percent <= 100
         ):
             item["ice_status"] = "inconclusive"
             continue
@@ -215,6 +220,7 @@ def analyze_ice(timeseries: list[dict[str, Any]]) -> dict[str, Any]:
             )
         elif ice_pixels == 0:
             item["ice_status"] = "no_ice_detected"
+            clear_intervals += 1
         else:
             item["ice_status"] = "inconclusive"
 
@@ -222,7 +228,7 @@ def analyze_ice(timeseries: list[dict[str, Any]]) -> dict[str, Any]:
         "possible_ice"
         if detections
         else "no_ice_detected"
-        if usable_intervals
+        if usable_intervals and clear_intervals == usable_intervals
         else "inconclusive"
     )
     return {
@@ -270,12 +276,16 @@ def _sentinel2_evalscript() -> str:
 
 
 def analyze_pond(pond_id: str, date_from: str, date_to: str) -> dict[str, Any]:
+    try:
+        validate_date_range(date_from, date_to)
+    except ValueError as exc:
+        return {"status": "error", "message": str(exc)}
     pond = get_pond_by_id(pond_id)
     if not pond:
         return {"status": "not_available", "message": "Water body was not found or is unavailable for analysis."}
 
     if not has_real_copernicus():
-        return demo_data.generate_demo_analysis(pond_id, date_from, date_to)
+        return demo_data.generate_demo_analysis(pond_id, date_from, date_to, pond=pond)
 
     geometry = pond.get("geometry")
     if not geometry:
@@ -286,6 +296,11 @@ def analyze_pond(pond_id: str, date_from: str, date_to: str) -> dict[str, Any]:
         api_response = _sentinel_hub_statistics(
             projected_geometry, date_from, date_to, _sentinel2_evalscript()
         )
+        if (
+            not isinstance(api_response, dict) or "error" in api_response
+            or not isinstance(api_response.get("data"), list)
+        ):
+            raise ValueError("Sentinel Hub returned an invalid statistics response.")
     except (requests.RequestException, ValueError) as exc:
         return {
             "status": "error",
@@ -295,17 +310,20 @@ def analyze_pond(pond_id: str, date_from: str, date_to: str) -> dict[str, Any]:
 
     timeseries = _extract_time_series(api_response)
     ice = analyze_ice(timeseries)
-    metrics = {
-        "average_ndwi": round(sum(item["ndwi"] for item in timeseries if item.get("ndwi") is not None) / max(1, len([item for item in timeseries if item.get("ndwi") is not None])), 3) if timeseries else None,
-        "average_ndti": round(sum(item["ndti"] for item in timeseries if item.get("ndti") is not None) / max(1, len([item for item in timeseries if item.get("ndti") is not None])), 3) if timeseries else None,
-        "average_ndci": round(sum(item["ndci"] for item in timeseries if item.get("ndci") is not None) / max(1, len([item for item in timeseries if item.get("ndci") is not None])), 3) if timeseries else None,
-        "water_area_estimate_m2": None,
-    }
-    valid_pixel_count = sum(item["valid_pixels"] for item in timeseries if item.get("valid_pixels") is not None) if timeseries else 0
-    low_confidence = valid_pixel_count < 10
+    metrics = {"water_area_estimate_m2": None}
+    for metric in ("ndwi", "ndti", "ndci"):
+        values = [_as_float(item.get(metric)) for item in timeseries]
+        values = [value for value in values if value is not None]
+        metrics[f"average_{metric}"] = round(sum(values) / len(values), 3) if values else None
+    pixel_counts = [item["valid_pixels"] for item in timeseries if item.get("valid_pixels") is not None]
+    valid_pixel_count = sum(pixel_counts)
+    # Repeated observations of the same few pixels do not improve spatial coverage.
+    max_valid_pixels = max(pixel_counts, default=0)
+    low_confidence = max_valid_pixels < 10
     quality = {
         "data_quality": "too few valid pixels" if low_confidence and timeseries else "partially available" if timeseries else "unavailable",
         "valid_pixels": valid_pixel_count,
+        "max_valid_pixels_per_interval": max_valid_pixels,
         "reliability": "low" if low_confidence else "medium",
         "limitations": "Limited coverage or few valid pixels may reduce estimate reliability.",
     }
@@ -326,11 +344,24 @@ def analyze_pond(pond_id: str, date_from: str, date_to: str) -> dict[str, Any]:
     }
 
 
-def analyze_algae_bloom(pond_id: str, date_from: str, date_to: str) -> dict[str, Any]:
-    if not has_real_copernicus():
-        return demo_data.generate_demo_algae_bloom(pond_id, date_from, date_to)
-
-    analysis = analyze_pond(pond_id, date_from, date_to)
+def analyze_algae_bloom(
+    pond_id: str,
+    date_from: str,
+    date_to: str,
+    *,
+    analysis: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if analysis is None:
+        analysis = analyze_pond(pond_id, date_from, date_to)
+    if analysis.get("demo_mode"):
+        ndci = analysis.get("metrics", {}).get("average_ndci")
+        return {
+            "status": "demo", "source": "simulated",
+            "ndci_trend": analysis.get("timeseries", []),
+            "category": "Elevated algae-related signal" if ndci is not None and ndci > 0.2 else "No strong change detected",
+            "interpretation": "This is a simulated screening result. NDCI does not identify cyanotoxin concentrations or specific cyanobacteria.",
+            "quality": analysis.get("quality_summary", {}),
+        }
     if analysis.get("status") != "ok":
         return {
             "status": "not_available",
@@ -340,17 +371,21 @@ def analyze_algae_bloom(pond_id: str, date_from: str, date_to: str) -> dict[str,
             "quality": analysis.get("quality_summary", {}),
         }
 
-    ndci_values = [item["ndci"] for item in analysis.get("timeseries", []) if item.get("ndci") is not None]
-    if analysis.get("quality_summary", {}).get("valid_pixels", 0) < 10:
+    ndci_values = [
+        value for item in analysis.get("timeseries", [])
+        if (item.get("valid_pixels") or 0) >= 10
+        and (value := _as_float(item.get("ndci"))) is not None
+    ]
+    if not ndci_values or analysis.get("quality_summary", {}).get("valid_pixels", 0) < 10:
         return {
             "status": "not_available",
             "source": "Sentinel-2 NDCI",
             "ndci_trend": analysis.get("timeseries", []),
             "category": "Insufficient data",
-            "interpretation": "There were too few valid pixels for a reliable algae screening.",
+            "interpretation": "There were not enough valid NDCI observations with sufficient pixels for an algae screening.",
             "quality": analysis.get("quality_summary", {}),
         }
-    mean_ndci = sum(ndci_values) / max(len(ndci_values), 1)
+    mean_ndci = sum(ndci_values) / len(ndci_values)
     if mean_ndci > 0.24:
         category = "Possible algae-bloom signal"
     elif mean_ndci > 0.18:

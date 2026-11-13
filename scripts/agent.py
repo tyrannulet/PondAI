@@ -10,6 +10,8 @@ from datetime import date
 from typing import Any
 
 from scripts.config import get_featherless_config, has_real_featherless
+from scripts.conversation import compose_reply, understand_request
+from scripts.date_utils import validate_date_range
 from scripts.geo_sources import find_ponds
 from scripts.satellite import analyze_algae_bloom, analyze_pond
 
@@ -68,6 +70,8 @@ def _extract_date_range(prompt: str) -> tuple[str | None, str | None]:
     date_matches = re.findall(r"\b(\d{4}-\d{2}-\d{2})\b", prompt)
     if len(date_matches) >= 2:
         return date_matches[0], date_matches[1]
+    if date_matches:
+        return date_matches[0], date_matches[0]
     years = _extract_years(prompt)
     if len(years) >= 1:
         start_year = years[0]
@@ -81,6 +85,8 @@ def _extract_date_range(prompt: str) -> tuple[str | None, str | None]:
     if month_match:
         count = month_match.group(1) or month_match.group(2)
         month_count = int(count) if count and count.isdigit() else MONTH_COUNTS.get((count or "one").casefold(), 1)
+        if month_count < 1:
+            raise ValueError("The number of months must be positive.")
         end = date.today()
         month_index = end.year * 12 + end.month - 1 - month_count
         year, month = divmod(month_index, 12)
@@ -92,54 +98,6 @@ def _extract_date_range(prompt: str) -> tuple[str | None, str | None]:
 def _canonicalize_municipality(name: str) -> str:
     cleaned = re.sub(r"\s+", " ", name).strip(" \t\r\n.,;:!?")
     return MUNICIPALITY_ALIASES.get(cleaned.casefold(), cleaned)
-
-
-def _normalize_municipality_with_featherless(prompt: str) -> str | None:
-    config = get_featherless_config()
-    if not has_real_featherless() or OpenAI is None:
-        return None
-
-    client = OpenAI(
-        base_url=config.get("FEATHERLESS_BASE_URL", "https://api.featherless.ai/v1"),
-        api_key=config["FEATHERLESS_API_KEY"],
-        timeout=30,
-    )
-    try:
-        response = client.chat.completions.create(
-            model=config.get("FEATHERLESS_MODEL", "Qwen/Qwen3-32B"),
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "Understand the full request and identify the Czech municipality "
-                        "where the water body should be searched. Separate the municipality "
-                        "from the date range (for example, 'in Řitce in 2025' means "
-                        "municipality Řitka and year 2025). Convert inflected Czech names "
-                        "to the official RÚIAN base form, and recognize common aliases "
-                        "(Valmez means Valašské Meziříčí). Never invent a municipality or "
-                        "treat a year as one. Return only JSON "
-                        "{\"municipality\": \"...\"}; if absent or uncertain, return "
-                        "{\"municipality\": null}."
-                    ),
-                },
-                {"role": "user", "content": prompt},
-            ],
-            response_format={"type": "json_object"},
-            temperature=0,
-            max_tokens=80,
-        )
-        content = response.choices[0].message.content
-        result = json.loads(content or "{}")
-        municipality = result.get("municipality")
-        if not isinstance(municipality, str) or not municipality.strip():
-            return None
-        return _canonicalize_municipality(municipality)
-    except (OpenAIError, json.JSONDecodeError, ValueError, TypeError, IndexError) as exc:
-        LOGGER.warning(
-            "Featherless municipality normalization failed (%s); using local normalization.",
-            type(exc).__name__,
-        )
-        return None
 
 
 def _extract_municipality(prompt: str) -> str | None:
@@ -218,24 +176,16 @@ def _extract_water_body_type(prompt: str) -> str:
 
 
 def _requests_charts(prompt: str) -> bool:
+    return _chart_preference(prompt) is True
+
+
+def _chart_preference(prompt: str) -> bool | None:
     lowered = prompt.casefold()
-    if re.search(r"\b(?:no|hide|without|don't show|do not show)\s+(?:the\s+)?(?:charts?|graphs?|plots?)\b", lowered):
+    if re.search(r"\b(?:no|hide|without|don't show|do not show|bez|skryj|neukazuj|nezobrazuj)\s+(?:the\s+)?(?:charts?|graphs?|plots?|graf\w*)\b", lowered):
         return False
-    return bool(re.search(r"\b(?:charts?|graphs?|plots?|graf(?:y|u|em)?|diagram(?:y|u)?)\b", lowered))
-
-
-def _dispatch_tool(function_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
-    allowed = {
-        "find_ponds": lambda: find_ponds(
-            arguments.get("municipality", ""),
-            arguments.get("pond_name"),
-            arguments.get("water_body_type", "pond"),
-        ),
-        "analyze_pond": lambda: analyze_pond(arguments.get("pond_id", ""), arguments.get("date_from", ""), arguments.get("date_to", "")),
-    }
-    if function_name not in allowed:
-        raise ValueError(f"Unsupported tool: {function_name}")
-    return allowed[function_name]()
+    if re.search(r"\b(?:charts?|graphs?|plots?|graf\w*|diagram\w*)\b", lowered):
+        return True
+    return None
 
 
 def _series_values(timeseries: list[dict[str, Any]], metric: str) -> list[tuple[str, float]]:
@@ -582,7 +532,7 @@ def _plain_language_report(
         lines.append("Ice screening is unavailable for the simulated demo data.")
     else:
         lines.append(
-            "Ice status is inconclusive because there were too few clear, valid satellite pixels."
+            "Ice status is inconclusive: the available observations do not support a clear snow/ice classification."
         )
 
     warning = analysis.get("warning")
@@ -598,7 +548,14 @@ def _analyze_selected_pond(
     include_charts: bool = False,
 ) -> dict[str, Any]:
     analysis = analyze_pond(pond["pond_id"], date_from, date_to)
-    algae = analyze_algae_bloom(pond["pond_id"], date_from, date_to)
+    if analysis.get("status") in ("error", "not_available"):
+        return {
+            "response": analysis.get("message") or analysis.get("warning") or "Satellite observations could not be loaded. Please try again.",
+            "analysis": None,
+            "selected_pond": pond,
+            "status": "error",
+        }
+    algae = analyze_algae_bloom(pond["pond_id"], date_from, date_to, analysis=analysis)
     report = _plain_language_report(pond, analysis, algae)
     chart_interpretation = (
         _interpret_analysis_charts(pond, analysis, algae) if include_charts else None
@@ -616,254 +573,191 @@ def _analyze_selected_pond(
     }
 
 
-def _call_featherless_tools(
-    prompt: str,
-    state: dict[str, Any] | None = None,
-    normalized_municipality: str | None = None,
-) -> dict[str, Any]:
-    config = get_featherless_config()
-    api_key = config.get("FEATHERLESS_API_KEY")
-    if not has_real_featherless() or OpenAI is None:
-        raise ValueError("Featherless is not configured.")
-
-    client = OpenAI(base_url=config.get("FEATHERLESS_BASE_URL", "https://api.featherless.ai/v1"), api_key=api_key)
-    tools = [
-        {
-            "type": "function",
-            "function": {
-                "name": "find_ponds",
-                "description": "Search a Czech municipality for ponds, reservoirs, lakes, or all mapped water bodies and return candidates.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "municipality": {"type": "string", "description": "Czech municipality name"},
-                        "pond_name": {"type": "string", "description": "Optional water-body name"},
-                        "water_body_type": {
-                            "type": "string",
-                            "enum": ["pond", "reservoir", "lake", "all"],
-                            "description": "Select pond, reservoir, lake, or all mapped water bodies",
-                        },
-                    },
-                    "required": ["municipality"],
-                },
-            },
-        },
-        {
-            "type": "function",
-            "function": {
-                "name": "analyze_pond",
-                "description": "Analyze satellite observations for a selected water body and date range.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "pond_id": {"type": "string", "description": "Water-body ID from the geodata search"},
-                        "date_from": {"type": "string", "description": "Start date in YYYY-MM-DD format"},
-                        "date_to": {"type": "string", "description": "End date in YYYY-MM-DD format"},
-                    },
-                    "required": ["pond_id", "date_from", "date_to"],
-                },
-            },
-        },
-    ]
-
-    system_prompt = (
-        "You are PondWatch AI, an assistant for Czech water bodies. Understand Czech "
-        "and English requests, including inflected municipality names and local aliases. "
-        "Normalize a municipality before searching, then use only the local find_ponds "
-        "and analyze_pond tools. Reply in English. Write a concise, plain-language "
-        "report by default; only discuss charts when the user asks for them. You are "
-        "also an expert in geospatial analysis and remote sensing. NDWI is a spectral "
-        "water indicator; water-pixel share is a classification inside a fixed polygon, "
-        "not water level or volume. Sentinel-2 pixels can mix water and shore, and "
-        "clouds, shadows, vegetation, turbidity, season, and valid-pixel count affect "
-        "results. NDTI is only an optical proxy for suspended particles and NDCI is a "
-        "rough chlorophyll/phytoplankton screening signal; neither is a laboratory "
-        "measurement. Interpret available data and missing observations without "
-        "inventing causes. Snow/ice-class pixels are only a satellite screening, not "
-        "confirmation that the water itself was frozen. Do not claim laboratory water "
-        "quality or confirmed freezing."
+def _is_exact_choice(prompt: str, state: dict[str, Any]) -> bool:
+    return (
+        bool(state.get("pending_candidates"))
+        and bool(re.fullmatch(r"\s*\d+\s*", prompt))
+        and not bool(_extract_years(prompt))
     )
-    if normalized_municipality:
-        system_prompt += (
-            f" The municipality normalization step identified the official name "
-            f"'{normalized_municipality}'. Use exactly this name as municipality in "
-            "the find_ponds tool."
+
+
+def _local_intent(prompt: str, state: dict[str, Any]) -> dict[str, Any]:
+    """Limited fallback when model understanding is unavailable."""
+    if _is_exact_choice(prompt, state):
+        return {"action": "select", "candidate_number": int(prompt)}
+    municipality = _extract_municipality(prompt)
+    pond_name = _extract_pond_name(prompt)
+    try:
+        date_from, date_to = _extract_date_range(prompt)
+        if date_from:
+            validate_date_range(date_from, date_to)
+    except (ValueError, OverflowError):
+        return {"action": "clarify", "clarification": "Please provide valid dates, with the start before the end (YYYY-MM-DD)."}
+    explanation = re.search(
+        r"\b(?:why|explain|meaning|mean|shorter|summarize|hello|hi|thanks|safe|swim|proč|vysvětli|znamená|stručněji|ahoj|děkuji|koupat)\b",
+        prompt, re.IGNORECASE,
+    )
+    if explanation and not date_from:
+        action = "chat"
+    elif municipality or pond_name or _is_broad_pond_search(prompt):
+        action = "search"
+    elif date_from or re.search(r"\b(?:analy[sz]e|analyzuj|analyzovat)\b", prompt, re.IGNORECASE):
+        action = "analyze"
+    else:
+        action = "chat"
+    return {
+        "action": action,
+        "municipality": municipality,
+        "pond_name": pond_name,
+        "water_body_type": _extract_water_body_type(prompt) if action == "search" else None,
+        "date_from": date_from,
+        "date_to": date_to,
+        "show_charts": _chart_preference(prompt),
+    }
+
+
+def _choice_result(state: dict[str, Any], message: str | None = None) -> dict[str, Any]:
+    candidates = state.get("pending_candidates") or []
+    choices = "; ".join(_describe_candidate(item, index) for index, item in enumerate(candidates))
+    return {
+        "response": message or "I found multiple water bodies. Choose one on the map or from the list: " + choices,
+        "analysis": None,
+        "status": "awaiting_choice",
+        "choices": candidates,
+        "action_facts": message or f"Found {len(candidates)} water bodies. The user must choose one from the map/list before analysis.",
+    }
+
+
+def _execute_intent(intent: dict[str, Any], state: dict[str, Any]) -> dict[str, Any]:
+    action = intent["action"]
+    if type(intent.get("show_charts")) is bool:
+        state["show_charts"] = intent["show_charts"]
+    if action == "chat":
+        analysis = state.get("analysis")
+        facts = (
+            "Answer the latest question using the existing observations; no new analysis was requested."
+            if analysis else "Help the user explore Czech water bodies. No analysis has been completed yet."
         )
-    messages: list[dict[str, Any]] = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": prompt},
-    ]
-    if state and state.get("chat_history"):
-        for item in state["chat_history"]:
-            role = "assistant" if item["role"] == "assistant" else "user"
-            messages.append({"role": role, "content": item["content"]})
+        fallback = (
+            "A conversational answer needs Featherless AI. Here is the available data summary:\n\n"
+            + _plain_language_report(state.get("selected_pond") or {}, analysis, analysis.get("algae") or {})
+            if analysis else "I can help find Czech water bodies and analyze satellite observations. Tell me the municipality and period you want to explore."
+        )
+        return {"response": facts, "fallback_response": fallback, "analysis": None, "status": "conversation"}
+    if action == "clarify":
+        return {"response": intent.get("clarification") or "Which water body and period do you mean?", "analysis": None, "status": "awaiting_input"}
 
-    for _ in range(6):
-        completion = client.chat.completions.create(model=config.get("FEATHERLESS_MODEL", "Qwen/Qwen3-32B"), messages=messages, tools=tools, tool_choice="auto")
-        message = completion.choices[0].message
-        tool_calls = getattr(message, "tool_calls", None) or []
-        if not tool_calls:
-            return {"response": message.content or "I could not produce a final answer.", "analysis": None}
+    selected = state.get("selected_pond")
+    municipality = (
+        intent.get("municipality") or state.get("last_municipality")
+        or (selected or {}).get("municipality")
+    )
+    if municipality:
+        municipality = _canonicalize_municipality(municipality)
+    current_municipality = str(
+        (selected or {}).get("municipality") or state.get("last_municipality") or ""
+    )
+    location_changed = bool(
+        intent.get("municipality")
+        and municipality.casefold() != current_municipality.casefold()
+    )
+    name_changed = bool(
+        intent.get("pond_name")
+        and intent["pond_name"].casefold() != str((selected or {}).get("name") or "").casefold()
+    )
+    type_changed = bool(
+        intent.get("water_body_type")
+        and intent["water_body_type"] != (state.get("last_water_body_type") or (selected or {}).get("water_body_type") or "pond")
+    )
+    if action == "analyze" and (
+        name_changed or location_changed or type_changed
+    ):
+        action = "search"
+    elif action == "select" and (location_changed or type_changed):
+        action = "search"
 
-        for tool_call in tool_calls:
-            func_name = tool_call.function.name
-            arguments = json.loads(tool_call.function.arguments or "{}")
-            if func_name == "find_ponds" and normalized_municipality:
-                arguments["municipality"] = normalized_municipality
-            if func_name == "find_ponds":
-                arguments.setdefault("water_body_type", _extract_water_body_type(prompt))
-            tool_result = _dispatch_tool(func_name, arguments)
-            call_message = tool_call.model_dump()
-            call_message["function"]["arguments"] = json.dumps(arguments, ensure_ascii=False)
-            messages.append({"role": "assistant", "content": "", "tool_calls": [call_message]})
-            messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": json.dumps(tool_result, ensure_ascii=False)})
+    if intent.get("date_from") and intent.get("date_to"):
+        state["last_date_from"] = intent["date_from"]
+        state["last_date_to"] = intent["date_to"]
+    date_from = state.get("last_date_from")
+    date_to = state.get("last_date_to")
 
-        last_response = client.chat.completions.create(model=config.get("FEATHERLESS_MODEL", "Qwen/Qwen3-32B"), messages=messages)
-        text = last_response.choices[0].message.content
-        if text:
-            return {"response": text, "analysis": None}
+    if action == "search":
+        if not municipality:
+            return {"response": "Which Czech municipality should I search in?", "analysis": None, "status": "awaiting_input"}
+        state["last_municipality"] = municipality
+        state["last_pond_name"] = intent.get("pond_name")
+        state["last_water_body_type"] = intent.get("water_body_type") or "pond"
+        for key in ("selected_pond", "pending_candidates", "pending_ponds", "analysis"):
+            state[key] = None
+        search = find_ponds(municipality, state["last_pond_name"], state["last_water_body_type"])
+        if search.get("status") == "multiple":
+            state["pending_candidates"] = search["candidates"]
+            state["pending_ponds"] = search.get("result") or []
+            return _choice_result(state)
+        if search.get("status") in ("not_found", "error") or not search.get("result"):
+            return {"response": search.get("message") or "No matching water body was found. Please refine your request.", "analysis": None, "status": search.get("status", "not_found")}
+        selected = search["result"][0]
+        state["selected_pond"] = selected
+    elif action == "select":
+        candidate = next((item for item in state.get("pending_candidates") or [] if item.get("number") == intent.get("candidate_number")), None)
+        if not candidate:
+            if state.get("pending_candidates"):
+                return _choice_result(state, "That choice is not in the current list. Choose a listed number or select a water body on the map.")
+            return {"response": "There is no pending list to select from. Which municipality should I search in?", "analysis": None, "status": "awaiting_input"}
+        selected = next((item for item in state.get("pending_ponds") or [] if item.get("pond_id") == candidate["pond_id"]), candidate)
+        state["selected_pond"] = selected
+        state["pending_candidates"] = None
+        state["pending_ponds"] = None
+    elif state.get("pending_candidates"):
+        return _choice_result(state, "The period is saved. Choose a water body from the existing map/list to continue.")
 
-    return {"response": "The agent could not complete the analysis within the allowed number of steps.", "analysis": None}
+    if not selected:
+        if municipality:
+            return _execute_intent({**intent, "action": "search"}, state)
+        return {"response": "Which Czech municipality or water body should I analyze?", "analysis": None, "status": "awaiting_input"}
+    if not date_from or not date_to:
+        return {
+            "response": f"Selected: {selected.get('name', 'Water body')}. Which period should I analyze? You can give a year, month, season, or date range.",
+            "analysis": None,
+            "selected_pond": selected,
+            "status": "awaiting_input",
+        }
+    return _analyze_selected_pond(selected, date_from, date_to, bool(state.get("show_charts")))
 
 
 def run_agent(prompt: str, state: dict[str, Any] | None = None) -> dict[str, Any]:
     if state is None:
         state = {}
-    if _requests_charts(prompt):
-        state["show_charts"] = True
-    raw_municipality = _extract_municipality(prompt)
-    municipality = raw_municipality or state.get("last_municipality")
-    normalized_municipality = None
-    is_pond_choice = bool(state.get("pending_candidates")) and re.fullmatch(r"\s*\d+\s*", prompt)
-    if (
-        has_real_featherless()
-        and not is_pond_choice
-        and (raw_municipality or not state.get("selected_pond"))
-    ):
-        normalized_municipality = _normalize_municipality_with_featherless(prompt)
-        if normalized_municipality:
-            municipality = normalized_municipality
+    # Number-only map/list choices are exact and do not need model interpretation.
+    exact_choice = _is_exact_choice(prompt, state)
+    intent = None if exact_choice else understand_request(prompt, state)
+    model_understood = intent is not None
+    intent = intent or _local_intent(prompt, state)
+    if intent["action"] in ("search", "analyze"):
+        state["analysis_request"] = prompt
+    try:
+        result = _execute_intent(intent, state)
+    except Exception as exc:
+        LOGGER.warning("PondWatch action failed (%s).", type(exc).__name__)
+        result = {"response": "The requested data could not be loaded. Please try again or refine the request.", "analysis": None, "status": "error"}
 
-    previous_municipality = state.get("last_municipality")
-    municipality_changed = bool(
-        municipality
-        and previous_municipality
-        and _canonicalize_municipality(municipality).casefold()
-        != _canonicalize_municipality(previous_municipality).casefold()
-    )
-    if municipality_changed or _is_broad_pond_search(prompt):
-        state["selected_pond"] = None
-        state["pending_candidates"] = None
-        state["pending_ponds"] = None
-        state["last_pond_name"] = None
-        state["last_date_from"] = None
-        state["last_date_to"] = None
-
-    if has_real_featherless() and not is_pond_choice:
-        try:
-            ai_result = _call_featherless_tools(
-                prompt, state, normalized_municipality
-            )
-            if ai_result.get("analysis") is not None or ai_result.get("status"):
-                return ai_result
-        except Exception:
-            pass
-
-    pond_name = _extract_pond_name(prompt)
-    if pond_name is None:
-        pond_name = state.get("last_pond_name")
-    date_from, date_to = _extract_date_range(prompt)
-    if date_from and date_to:
-        state["last_date_from"] = date_from
-        state["last_date_to"] = date_to
-    elif state.get("pending_candidates"):
-        date_from = state.get("last_date_from")
-        date_to = state.get("last_date_to")
-
-    if not municipality:
-        return {"response": "I could not identify the municipality. Please specify a Czech municipality, for example 'a pond in Řitka'.", "analysis": None, "status": "awaiting_input"}
-
-    state["last_municipality"] = municipality
-    state["last_pond_name"] = pond_name
-
-    if state.get("pending_candidates") and re.search(r"\b\d+\b", prompt):
-        selection = re.search(r"\b(\d+)\b", prompt)
-        if selection:
-            choice = int(selection.group(1))
-            candidates = state["pending_candidates"]
-            selected_candidate = next((item for item in candidates if int(item["number"]) == choice), None)
-            if selected_candidate:
-                selected = next(
-                    (
-                        item
-                        for item in state.get("pending_ponds", [])
-                        if item.get("pond_id") == selected_candidate["pond_id"]
-                    ),
-                    selected_candidate,
-                )
-                state["selected_pond"] = selected
-                if not date_from or not date_to:
-                    state["pending_candidates"] = None
-                    state["pending_ponds"] = None
-                    return {"response": "Selected: " + selected["name"] + ". Please specify a date range, for example '2025-01-01 to 2025-12-31'.", "analysis": None, "selected_pond": selected, "status": "awaiting_input"}
-                state["pending_candidates"] = None
-                state["pending_ponds"] = None
-                return _analyze_selected_pond(
-                    selected, date_from, date_to, bool(state.get("show_charts"))
-                )
-
-    explicit_municipality = _extract_municipality(prompt)
-    if (
-        state.get("selected_pond")
-        and date_from
-        and date_to
-        and explicit_municipality is None
-        and not state.get("pending_candidates")
-    ):
-        return _analyze_selected_pond(
-            state["selected_pond"], date_from, date_to, bool(state.get("show_charts"))
-        )
-
-    pond_search = find_ponds(
-        municipality, pond_name, _extract_water_body_type(prompt)
-    )
-    if pond_search.get("status") == "multiple":
-        state["pending_candidates"] = pond_search["candidates"]
-        state["pending_ponds"] = pond_search.get("result", [])
-        choices = "; ".join(
-            _describe_candidate(item, index)
-            for index, item in enumerate(pond_search["candidates"])
-        )
-        return {
-            "response": (
-                f"Using the municipality “{pond_search.get('municipality', municipality)}”. "
-                "I found multiple water bodies. Choose one on the map or from the list below: "
-                + choices
-                + "."
-            ),
-            "analysis": None,
-            "status": "awaiting_choice",
-            "choices": pond_search["candidates"],
-        }
-
-    if pond_search.get("status") in ("not_found", "error"):
-        return {"response": pond_search.get("message", "No water body was found. Please refine your request."), "analysis": None, "status": "not_found"}
-
-    pond = pond_search["result"][0]
-    state["selected_pond"] = pond
-    if not date_from or not date_to:
-        canonical_name = pond_search.get("municipality", municipality)
-        return {
-            "response": (
-                f"Using the municipality “{canonical_name}”. "
-                f"Found: {pond['name']}. Please specify a date range, "
-                "for example “2025-01-01 to 2025-12-31”."
-            ),
-            "analysis": None,
-            "selected_pond": pond,
-            "status": "awaiting_input",
-        }
-
-    return _analyze_selected_pond(
-        pond, date_from, date_to, bool(state.get("show_charts"))
-    )
+    reply = compose_reply(prompt, state, result)
+    if reply:
+        result["response"] = reply
+        result["response_source"] = "model"
+    else:
+        result["response"] = result.get("fallback_response", result["response"])
+        result["response_source"] = "fallback"
+    result["understanding_source"] = "model" if model_understood else ("selection" if exact_choice else "local")
+    if result["response_source"] == "fallback":
+        result["ai_note"] = "AI conversation is unavailable; showing an automatic response."
+    elif not model_understood and not exact_choice:
+        result["ai_note"] = "AI request understanding was unavailable; local rules handled the action."
+    if result.get("analysis") is not None:
+        result["analysis"]["report"] = result["response"]
+        state["analysis"] = result["analysis"]
+    elif result.get("status") == "error":
+        state["analysis"] = None
+    state["ai_note"] = result.get("ai_note")
+    return result

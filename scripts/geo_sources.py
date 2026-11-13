@@ -4,6 +4,8 @@ import json
 from typing import Any
 
 import requests
+from shapely.geometry import Polygon, shape
+from shapely.errors import ShapelyError
 
 from scripts import demo_data
 
@@ -56,32 +58,47 @@ def _to_float(value: Any) -> float | None:
 def _normalise_geometry(geometry: dict[str, Any] | None) -> dict[str, Any] | None:
     if not geometry:
         return None
-    if geometry.get("type") == "Polygon":
+    if geometry.get("type") in ("Polygon", "MultiPolygon"):
         return geometry
     if geometry.get("rings"):
-        return {
-            "type": "Polygon",
-            "coordinates": geometry["rings"],
-        }
+        rings = geometry["rings"]
+        polygons = [Polygon(ring) for ring in rings]
+        # Containment works regardless of ring order or winding direction. Each
+        # odd-depth ring is a hole; an island inside a hole starts a new polygon.
+        parents = []
+        for index, polygon in enumerate(polygons):
+            containers = [
+                other for other, candidate in enumerate(polygons)
+                if other != index and candidate.area > polygon.area and candidate.covers(polygon)
+            ]
+            parents.append(min(containers, key=lambda other: polygons[other].area) if containers else None)
+        depths = []
+        for index in range(len(rings)):
+            depth, parent = 0, parents[index]
+            while parent is not None:
+                depth += 1
+                parent = parents[parent]
+            depths.append(depth)
+        coordinates = [
+            [ring, *[rings[child] for child, parent in enumerate(parents) if parent == index and depths[child] % 2]]
+            for index, ring in enumerate(rings) if depths[index] % 2 == 0
+        ]
+        if len(coordinates) == 1:
+            return {"type": "Polygon", "coordinates": coordinates[0]}
+        return {"type": "MultiPolygon", "coordinates": coordinates}
     return geometry
 
 
 def _approximate_location(geometry: dict[str, Any] | None) -> dict[str, float] | None:
     if not geometry:
         return None
-    coordinates = geometry.get("coordinates") or []
-    if not coordinates or not isinstance(coordinates[0], list):
+    try:
+        point = shape(geometry).representative_point()
+        if point.is_empty:
+            return None
+        return {"longitude": point.x, "latitude": point.y}
+    except (ShapelyError, ValueError, TypeError, KeyError):
         return None
-    ring = coordinates[0]
-    points = [point for point in ring if isinstance(point, (list, tuple)) and len(point) >= 2]
-    if len(points) > 1 and points[0] == points[-1]:
-        points.pop()
-    if not points:
-        return None
-    return {
-        "longitude": sum(float(point[0]) for point in points) / len(points),
-        "latitude": sum(float(point[1]) for point in points) / len(points),
-    }
 
 
 def _normalise_pond_result(feature: dict[str, Any]) -> dict[str, Any]:
@@ -277,10 +294,11 @@ def get_pond_by_id(pond_id: str) -> dict[str, Any] | None:
         }
 
     try:
+        escaped_id = str(pond_id).replace("'", "''")
         response = _call_arcgis(
             ZABAGED_URL,
             {
-                "where": f"fid_zbg = '{str(pond_id)}'",
+                "where": f"fid_zbg = '{escaped_id}'",
                 "outFields": "*",
                 "returnGeometry": "true",
                 "outSR": 4326,

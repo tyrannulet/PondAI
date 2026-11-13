@@ -1,6 +1,6 @@
 # PondWatch AI
 
-PondWatch AI is a Streamlit app for exploring Czech ponds, reservoirs, and other mapped water bodies using satellite data. It accepts natural-language requests in English or Czech, searches RÚIAN and ZABAGED, and provides a plain-language report by default. Charts and measurement tables are optional.
+PondWatch AI is a Streamlit app for exploring Czech ponds, reservoirs, and other mapped water bodies using satellite data. It accepts natural-language requests in English or Czech, searches RÚIAN and ZABAGED, and discusses the results in a conversational chat. Charts and measurement tables are optional.
 
 ## Features
 
@@ -8,7 +8,8 @@ PondWatch AI is a Streamlit app for exploring Czech ponds, reservoirs, and other
 - Analyze Sentinel-2 water-surface and optical indicators (NDWI, NDTI, and NDCI).
 - Screen for possible ice or snow using Sentinel-2 scene classification. This is not confirmation that a water surface was frozen.
 - Select among multiple candidates using a map and a descriptive list.
-- Use Featherless AI for request interpretation and tool calling.
+- Use Featherless AI to understand requests in context and write answers based on the actual results, in the user's language.
+- Ask follow-up questions, choose a candidate naturally ("take the larger one"), or change the period without repeating the location.
 - Run in demo mode with simulated values when API credentials are unavailable.
 
 ## Agent architecture
@@ -16,9 +17,16 @@ PondWatch AI is a Streamlit app for exploring Czech ponds, reservoirs, and other
 - `scripts/config.py` loads configuration from `api/` and checks for placeholders.
 - `scripts/geo_sources.py` searches municipalities and water bodies through RÚIAN and ZABAGED.
 - `scripts/satellite.py` analyzes Sentinel-2 data and provides algae and possible-ice screening.
-- `scripts/agent.py` interprets requests and calls `find_ponds()` and `analyze_pond()`.
+- `scripts/conversation.py` passes recent chat history, the selected water body, candidates, and measurements to Featherless for structured request understanding and conversational replies.
+- `scripts/agent.py` validates the requested action, calls `find_ponds()` and `analyze_pond()`, and keeps the conversation's selection and period.
 - `scripts/app.py` renders the Streamlit interface.
 - `scripts/demo_data.py` provides simulated values when real API credentials are unavailable.
+
+## Conversational analysis
+
+Start with a request such as "Analyze ponds in Řitka for last summer." After choosing a water body, you can continue with "Why do NDWI and water percentage differ?", "Explain it more simply", or "And for 2024?" The model receives the recent conversation and measured values, so an explanation uses existing results; a request for another period runs a new analysis for the selected water body. Asking to show or hide charts updates the display without fetching satellite data again.
+
+The model first returns a structured intent, and the application executes the corresponding search, selection, or analysis once. A second model call writes the answer using the result and available observations. Context is bounded to 12 recent messages, 60 candidates, and 72 representative observations, with statistics computed over the full series. Numerical claims are checked against the supplied context; unsupported numbers trigger one correction attempt. If the model is unavailable or its answer is rejected, the interface explicitly labels the automatic fallback. This check does not validate every possible verbal interpretation of the measurements.
 
 ## Install dependencies
 
@@ -121,6 +129,24 @@ The default address is http://localhost:8501; the Windows launcher uses port 850
 ```
 
 On Windows, use `.venv\Scripts\python.exe -m unittest discover -s tests -v`.
+
+The default suite uses controlled API responses without making external requests.
+It covers request parsing, conversation state, invalid credentials and dates,
+satellite errors and missing measurements, reliability, ice screening, demo
+identity and period coverage, map geometry, and four Streamlit interface flows.
+
+An optional live integration test searches RÚIAN/ZABAGED, analyzes one water body
+for June 2025 with Copernicus, and checks a Featherless follow-up without fetching
+the observations again. It requires valid credentials, network access, and uses
+API quota. Enable it explicitly on macOS / Linux with:
+
+```bash
+PONDAI_LIVE_TESTS=1 .venv/bin/python -m unittest discover -s tests -p test_live_integration.py -v
+```
+
+On Windows PowerShell, set `$env:PONDAI_LIVE_TESTS = '1'`, run the same unittest
+arguments using `.venv\Scripts\python.exe`, then remove the variable with
+`Remove-Item Env:PONDAI_LIVE_TESTS`.
 
 ## Loading icons
 

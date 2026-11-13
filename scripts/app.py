@@ -11,8 +11,9 @@ import streamlit as st
 from streamlit_folium import st_folium
 
 from scripts import demo_data
-from scripts.agent import _fallback_chart_interpretation, _requests_charts, run_agent
+from scripts.agent import _fallback_chart_interpretation, run_agent
 from scripts.config import APP_SUBTITLE, APP_TITLE, get_api_status, has_real_copernicus, has_real_featherless
+from scripts.geo_sources import _approximate_location
 
 # ---------------------------------------------------------------------------
 # Color palette
@@ -102,19 +103,19 @@ def _render_map(geometry: dict[str, Any] | None, pond_name: str) -> None:
     if not geometry:
         st.info("No polygon is available to display on the map.")
         return
-    coords = geometry.get("coordinates", [])
-    if not coords:
+    location = _approximate_location(geometry)
+    if not location:
         st.info("The polygon is not available yet.")
-        return
-    shape = coords[0] if isinstance(coords[0], list) and coords[0] and isinstance(coords[0][0], list) else coords
-    if not shape:
-        st.info("The polygon is empty.")
         return
 
     import folium
 
-    m = folium.Map(location=[shape[0][1], shape[0][0]], zoom_start=14, tiles="OpenStreetMap")
-    folium.Polygon(locations=[[point[1], point[0]] for point in shape], color="green", fill=True, fill_opacity=0.4, tooltip=pond_name).add_to(m)
+    m = folium.Map(location=[location["latitude"], location["longitude"]], zoom_start=14, tiles="OpenStreetMap")
+    layer = folium.GeoJson(
+        geometry, tooltip=escape(pond_name),
+        style_function=lambda _: {"color": "green", "fillOpacity": 0.4},
+    ).add_to(m)
+    m.fit_bounds(layer.get_bounds())
     st_folium(m, width=700, height=420)
     st.caption(f"Map: {pond_name}")
 
@@ -135,20 +136,13 @@ def _pond_option_label(pond: dict[str, Any], index: int) -> str:
 def _render_candidate_map(ponds: list[dict[str, Any]]) -> None:
     import folium
 
-    candidates: list[tuple[int, dict[str, Any], list[list[float]], tuple[float, float]]] = []
+    candidates: list[tuple[int, dict[str, Any], dict[str, Any], tuple[float, float]]] = []
     for index, pond in enumerate(ponds):
         geometry = pond.get("geometry") or {}
-        coordinates = geometry.get("coordinates") or []
-        if not coordinates or not coordinates[0]:
+        location = _approximate_location(geometry)
+        if not location:
             continue
-        ring = coordinates[0]
-        points = [point for point in ring if isinstance(point, (list, tuple)) and len(point) >= 2]
-        if not points:
-            continue
-        location = pond.get("approx_location") or {}
-        longitude = location.get("longitude", sum(float(point[0]) for point in points) / len(points))
-        latitude = location.get("latitude", sum(float(point[1]) for point in points) / len(points))
-        candidates.append((index, pond, points, (float(latitude), float(longitude))))
+        candidates.append((index, pond, geometry, (location["latitude"], location["longitude"])))
 
     if not candidates:
         st.info("No candidate polygons are available to display on the map.")
@@ -161,24 +155,21 @@ def _render_candidate_map(ponds: list[dict[str, Any]]) -> None:
     map_obj = folium.Map(location=center, zoom_start=14, tiles="OpenStreetMap")
     colors = ["blue", "red", "green", "purple", "orange", "darkred", "cadetblue"]
     all_points: list[tuple[float, float]] = []
-    for index, pond, ring, location in candidates:
+    for index, pond, geometry, location in candidates:
         color = colors[index % len(colors)]
         label = _pond_option_label(pond, index)
-        folium.Polygon(
-            locations=[[float(point[1]), float(point[0])] for point in ring],
-            color=color,
-            fill=True,
-            fill_color=color,
-            fill_opacity=0.35,
-            tooltip=label,
+        layer = folium.GeoJson(
+            geometry,
+            style_function=lambda _, color=color: {"color": color, "fillColor": color, "fillOpacity": 0.35},
+            tooltip=escape(label),
         ).add_to(map_obj)
         folium.Marker(
             location=location,
             tooltip=f"Candidate {index + 1}",
-            popup=label,
+            popup=escape(label),
             icon=folium.Icon(color=color, icon="info-sign"),
         ).add_to(map_obj)
-        all_points.extend((float(point[1]), float(point[0])) for point in ring)
+        all_points.extend(tuple(point) for point in layer.get_bounds())
 
     if all_points:
         latitudes = [point[0] for point in all_points]
@@ -680,8 +671,6 @@ def main() -> None:
         with st.chat_message("user"):
             st.markdown(prompt)
 
-        if _requests_charts(prompt):
-            st.session_state["show_charts"] = True
         with _pond_thinking("Understanding your request and preparing the analysis…"):
             result = run_agent(prompt, st.session_state)
         if result.get("status") == "awaiting_choice":
@@ -696,6 +685,9 @@ def main() -> None:
             st.markdown(result["response"])
 
     _render_pond_picker()
+
+    if st.session_state.get("ai_note"):
+        st.caption(st.session_state["ai_note"])
 
     analysis = st.session_state.get("analysis")
     selected_pond = st.session_state.get("selected_pond")
@@ -725,14 +717,15 @@ def main() -> None:
 
     series = analysis.get("timeseries") or []
     if series:
-        _render_analytics_widget(analysis)
+        if st.checkbox("Show analytics charts", key="show_charts"):
+            _render_analytics_widget(analysis)
 
         if st.checkbox("Show measurements table", key="show_table", value=False):
             df = pd.DataFrame(series)
             st.subheader("Measurements")
             columns = [
                 column
-                for column in ("date", "ndwi", "ndti", "water_percent", "ice_percent", "valid_pixels")
+                for column in ("date", "ndwi", "ndti", "ndci", "water_percent", "ice_percent", "valid_pixels")
                 if column in df
             ]
             st.dataframe(df[columns], use_container_width=True)

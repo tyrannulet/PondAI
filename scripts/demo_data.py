@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from typing import Any
+
+from scripts.date_utils import validate_date_range
 
 
 DEMO_PONDS = {
@@ -56,11 +58,7 @@ def get_demo_ponds_for_municipality(municipality: str | None = None) -> list[dic
 
 
 def _iso_dates(start: str | None, end: str | None) -> tuple[date, date]:
-    start_day = date.fromisoformat(start) if start else date(2025, 1, 1)
-    end_day = date.fromisoformat(end) if end else date(2025, 12, 31)
-    if end_day < start_day:
-        start_day, end_day = end_day, start_day
-    return start_day, end_day
+    return validate_date_range(start or "2025-01-01", end or "2025-12-31")
 
 
 def _generate_period_series(start: date, end: date) -> list[date]:
@@ -68,16 +66,23 @@ def _generate_period_series(start: date, end: date) -> list[date]:
     items: list[date] = []
     while cursor <= end:
         items.append(cursor)
+        if (end - cursor).days < 10:
+            break
         cursor += timedelta(days=10)
     if not items:
         items = [start]
     if items[-1] != end:
-        items[-1] = end
+        items.append(end)
     return items
 
 
-def generate_demo_analysis(pond_id: str, date_from: str | None = None, date_to: str | None = None) -> dict[str, Any]:
-    pond = DEMO_PONDS.get(pond_id) or next(iter(DEMO_PONDS.values()))
+def generate_demo_analysis(
+    pond_id: str, date_from: str | None = None, date_to: str | None = None,
+    *, pond: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    pond = pond if pond is not None else DEMO_PONDS.get(pond_id)
+    if not pond or pond.get("pond_id") != pond_id:
+        raise ValueError("The selected water body is not available for demo analysis.")
     start_day, end_day = _iso_dates(date_from, date_to)
     periods = _generate_period_series(start_day, end_day)
     ndwi_values = [0.11, 0.18, 0.22, 0.15, 0.09, 0.26, 0.20, 0.17, 0.14, 0.12]
@@ -86,7 +91,8 @@ def generate_demo_analysis(pond_id: str, date_from: str | None = None, date_to: 
     ndci_values = [0.12, 0.14, 0.21, 0.18, 0.16, 0.25, 0.22, 0.19, 0.17, 0.16]
     valid_pixels = [5300, 5900, 6200, 6450, 6100, 6550, 6300, 6000, 5750, 5600]
     timeseries: list[dict[str, Any]] = []
-    for index, current_day in enumerate(periods[: len(ndwi_values)]):
+    for observation_index, current_day in enumerate(periods):
+        index = observation_index % len(ndwi_values)
         timeseries.append(
             {
                 "date": current_day.isoformat(),
@@ -117,7 +123,8 @@ def generate_demo_analysis(pond_id: str, date_from: str | None = None, date_to: 
         "warning": "Demo mode: these values are simulated and are not a real satellite analysis.",
         "pond_id": pond["pond_id"],
         "pond_name": pond["name"],
-        "municipality": pond["municipality"],
+        "municipality": pond.get("municipality", "unknown"),
+        "geometry": pond.get("geometry"),
         "date_from": start_day.isoformat(),
         "date_to": end_day.isoformat(),
         "source": "Sentinel-2 demo dataset",
