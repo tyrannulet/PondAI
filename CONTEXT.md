@@ -82,3 +82,10 @@ Záznam významných změn a důvodů jejich provedení. Při dalších úpravá
 - Doplněny lokální převody „v Praze“ → „Praha“, „v Mníšku pod Brdy“ → „Mníšek pod Brdy“ a rozpoznání „ve městě Řitka“ i bez AI.
 - Živě ověřeny všechny tři hlášené dotazy bez Featherless: Praha vrací 245 kandidátů, Mníšek pod Brdy 18 a Řitka 2. U všech je filtr rybníka `None`; rok 2025 se zachová u dotazů, které jej obsahují.
 - Přidány regresní testy parseru, výběru obce a zrušení starého filtru při nové lokalitě.
+
+## 2026-11-13 — oprava spouštěcího skriptu a prostředí
+
+- Aktualizován `.gitignore`: přidány `venv/`, `.venv/` a `.idea/`.
+- Přidána konfigurace Streamlit (`.streamlit/credentials.toml` a `config.toml`) potlačující interaktivní dotaz na e-mail při prvním spuštění a vypínající telemetrii.
+- Upraven dávkový skript `Spustit PondWatch.bat`: přednostně detekuje a používá lokální virtuální prostředí `venv`/`.venv` namísto systémového Pythonu a v případě potřeby automaticky vytvoří `.venv`. Tím se brání selhání instalace závislostí z PyPI.
+
