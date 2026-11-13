@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import math
 import time
 from typing import Any
 
@@ -99,17 +100,23 @@ def _extract_metric_value(payload: dict[str, Any], metric_name: str) -> float | 
         if isinstance(current, dict):
             for key, value in current.items():
                 if key.lower() == metric_name.lower():
-                    if isinstance(value, (int, float)):
-                        return float(value)
-                    if isinstance(value, str):
-                        try:
-                            return float(value)
-                        except ValueError:
-                            pass
+                    parsed_value = _as_float(value)
+                    if parsed_value is not None:
+                        return parsed_value
                 stack.append(value)
         elif isinstance(current, list):
             stack.extend(current)
     return None
+
+
+def _as_float(value: Any) -> float | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return None
+    try:
+        parsed_value = float(value)
+    except (OverflowError, ValueError):
+        return None
+    return parsed_value if math.isfinite(parsed_value) else None
 
 
 def _extract_time_series(payload: dict[str, Any]) -> list[dict[str, Any]]:
@@ -127,10 +134,10 @@ def _extract_time_series(payload: dict[str, Any]) -> list[dict[str, Any]]:
         date_from_value = interval.get("from") if isinstance(interval, dict) else None
         date_to_value = interval.get("to") if isinstance(interval, dict) else None
         band_stats = [((bands.get(f"B{index}") or {}).get("stats") or {}) for index in range(4)]
-        means = [stat.get("mean") for stat in band_stats]
+        means = [_as_float(stat.get("mean")) for stat in band_stats]
         ndwi, ndti, ndci, water_share = means
-        valid_pixels = band_stats[0].get("sampleCount")
-        ndci_median = (band_stats[2].get("percentiles") or {}).get("50.0")
+        valid_pixels = _as_float(band_stats[0].get("sampleCount"))
+        ndci_median = _as_float((band_stats[2].get("percentiles") or {}).get("50.0"))
         series.append(
             {
                 "date": str(date_from_value or date_to_value or "").split("T")[0],

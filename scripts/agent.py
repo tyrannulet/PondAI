@@ -80,7 +80,7 @@ def _canonicalize_municipality(name: str) -> str:
     return MUNICIPALITY_ALIASES.get(cleaned.casefold(), cleaned)
 
 
-def _normalize_municipality_with_featherless(name: str) -> str | None:
+def _normalize_municipality_with_featherless(prompt: str) -> str | None:
     config = get_featherless_config()
     if not has_real_featherless() or OpenAI is None:
         return None
@@ -97,14 +97,19 @@ def _normalize_municipality_with_featherless(name: str) -> str | None:
                 {
                     "role": "system",
                     "content": (
-                        "Normalizuj pouze předaný název české obce do úředního základního "
-                        "tvaru používaného v RÚIAN. Oprav skloňování (např. Řitce → Řitka), "
-                        "známé zkratky a místní názvy (např. Valmez → Valašské Meziříčí). "
-                        "Nevymýšlej obec. Vrať pouze JSON objekt {\"municipality\": \"...\"}; "
-                        "pokud si nejsi jistý, vrať {\"municipality\": null}."
+                        "Nejprve pochop celý uživatelský požadavek a z něj urč jednu obec, "
+                        "ve které se má hledat rybník. Odděl název obce od časového období "
+                        "(například „v Řitce v roce 2025“ obsahuje obec Řitka a rok 2025). "
+                        "Převeď skloňovaný název do úředního základního tvaru používaného "
+                        "v RÚIAN (např. Řitce → Řitka), rozpoznej známé zkratky a místní "
+                        "názvy (např. Valmez → Valašské Meziříčí). Obec nevymýšlej a "
+                        "nepovažuj rok ani jinou časovou informaci za název obce. Vrať "
+                        "pouze JSON objekt {\"municipality\": \"...\"}; pokud obec v "
+                        "požadavku není nebo si nejsi jistý, vrať "
+                        "{\"municipality\": null}."
                     ),
                 },
-                {"role": "user", "content": name},
+                {"role": "user", "content": prompt},
             ],
             response_format={"type": "json_object"},
             temperature=0,
@@ -125,9 +130,9 @@ def _normalize_municipality_with_featherless(name: str) -> str | None:
 
 
 def _extract_municipality(prompt: str) -> str | None:
-    stop_words = r"(?:a|za|od|do|pro|během|poslední|minulý|minulém|celý|celou)"
+    stop_words = r"(?:a|za|od|do|pro|během|roce|roku|poslední|minulý|minulém|celý|celou)"
     patterns = [
-        rf"\b(?:v|ve)\s+([A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽa-záčďéěíňóřšťúůýž\s-]+?)(?=\s+{stop_words}\b|[,;.!?]|$)",
+        rf"\b(?:v|ve)\s+([A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽa-záčďéěíňóřšťúůýž\s-]+?)(?=\s+{stop_words}\b|\s+(?:v|ve)\s+(?:roce|roku)\b|[,;.!?]|$)",
         rf"\b(?:obec|město|městě)\s+([A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽa-záčďéěíňóřšťúůýž\s-]+?)(?=\s+{stop_words}\b|[,;.!?]|$)",
     ]
     for pattern in patterns:
@@ -305,8 +310,12 @@ def run_agent(prompt: str, state: dict[str, Any] | None = None) -> dict[str, Any
     municipality = raw_municipality or state.get("last_municipality")
     normalized_municipality = None
     is_pond_choice = bool(state.get("pending_candidates")) and re.fullmatch(r"\s*\d+\s*", prompt)
-    if raw_municipality and has_real_featherless() and not is_pond_choice:
-        normalized_municipality = _normalize_municipality_with_featherless(raw_municipality)
+    if (
+        has_real_featherless()
+        and not is_pond_choice
+        and (raw_municipality or not state.get("selected_pond"))
+    ):
+        normalized_municipality = _normalize_municipality_with_featherless(prompt)
         if normalized_municipality:
             municipality = normalized_municipality
 

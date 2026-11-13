@@ -40,6 +40,8 @@ Záznam významných změn a důvodů jejich provedení. Při dalších úpravá
 - Normalizovaný název se vynutí v argumentech `find_ponds` i v místní záložní cestě, aby model nemohl omylem vyhledávat pouze skloňovaný tvar.
 - Při selhání normalizačního API se použije místní parser a zaznamená se pouze typ chyby, nikdy klíč nebo token. Odpověď v chatu zobrazí rozpoznaný základní tvar obce.
 - Ověřeno na živém hledání: „rybník v Řitce“ → „Řitka“ → dva rybníky v RÚIAN/ZABAGED.
+- Doplněno zpracování celého promptu před tool-callingem. Důvod: věta „v Řitce v roce 2025“ předchozím parserem zachytila chybně jako „Řitce v“ a odpověděla, že obec nezná.
+- Parser nyní odděluje i tvary „v roce“ a „v roce 2025“. Živě ověřen přesný požadavek na analýzu rybníku v Řitce za rok 2025: obec normalizována na „Řitka“, rok zachován a nalezeny dva rybníky.
 
 ## Ověření a spuštění
 
@@ -47,3 +49,9 @@ Záznam významných změn a důvodů jejich provedení. Při dalších úpravá
 - Ověření živého vyhledávání: Valašské Meziříčí vrací několik kandidátů z RÚIAN/ZABAGED; pro testovací požadavek „Valmez“ aplikace nabídla 4 rybníky.
 - Lokální aplikace byla testována na `http://localhost:8502`.
 - API konfigurační soubory jsou v `api/featherless.txt` a `api/copernicus.txt`; do tohoto záznamu se jejich obsah neukládá.
+
+## 2026-11-13 — parsování číselných statistik Sentinel Hub
+
+- Pád při analýze Řiteckého rybníka způsobila textová hodnota statistiky (např. `"0.42"`) v odpovědi Sentinel Hub, kterou kód před zaokrouhlením nepřevedl na číslo.
+- Přidán bezpečný převod číselných hodnot i řetězců; nečíselné a nekonečné hodnoty se považují za nedostupná měření. Převod se používá pro indexy, medián, podíl vody i počet pixelů.
+- Přidány regresní testy pro číselné řetězce a neplatné hodnoty.
