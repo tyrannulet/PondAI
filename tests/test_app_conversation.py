@@ -15,6 +15,31 @@ MULTIPOLYGON = {"type": "MultiPolygon", "coordinates": [
 
 
 class ChatInterfaceTests(unittest.TestCase):
+    def test_visualizations_can_be_hidden_without_losing_the_report_or_analysis(self):
+        with (
+            patch.object(config, "has_real_copernicus", return_value=False),
+            patch.object(agent, "run_agent") as run_agent,
+        ):
+            app = AppTest.from_file(APP_PATH, default_timeout=15).run()
+            original_analysis = app.session_state["analysis"]
+            self.assertEqual(len(app.get("component_instance")), 1)
+            app.checkbox(key="show_map").uncheck().run()
+            self.assertEqual(len(app.get("component_instance")), 0)
+            self.assertEqual(len(app.get("plotly_chart")), 0)
+            self.assertTrue(any("Visualizations are hidden" in item.value for item in app.caption))
+            self.assertTrue(any(original_analysis["report"] == item.value for item in app.markdown))
+
+            app.checkbox(key="show_charts").check().run()
+            self.assertEqual([tab.label for tab in app.tabs], ["Analytics"])
+            self.assertGreater(len(app.get("plotly_chart")), 0)
+            self.assertEqual(len(app.get("component_instance")), 0)
+            app.checkbox(key="show_map").check().run()
+            self.assertEqual([tab.label for tab in app.tabs], ["Analytics", "Map"])
+            self.assertEqual(len(app.get("component_instance")), 1)
+            self.assertEqual(app.session_state["analysis"], original_analysis)
+            run_agent.assert_not_called()
+        self.assertEqual(len(app.exception), 0)
+
     def test_demo_starts_and_displays_all_metrics_and_measurements(self):
         with patch.object(config, "has_real_copernicus", return_value=False):
             app = AppTest.from_file(APP_PATH, default_timeout=15).run()

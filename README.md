@@ -90,6 +90,7 @@ python -m streamlit run scripts/app.py
 - The app identifies the municipality, water-body type, and date range.
 - If multiple candidates are found, select one from the map and list.
 - A plain-language report is shown by default; opt into charts and measurements using the checkbox or by asking for charts.
+- Maps and analytics share a dark visual panel beside the conversation and report. On wide screens the panel stays visible while reading; on smaller screens it moves below the text. Use the visibility checkboxes to hide either view, and the Map / Analytics tabs to switch between them. Detailed charts expand below the preview cards.
 
 ## Demo mode
 

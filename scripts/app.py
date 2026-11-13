@@ -86,6 +86,7 @@ def _default_analysis() -> dict[str, Any]:
 def _ensure_session() -> None:
     st.session_state.setdefault("messages", [])
     st.session_state.setdefault("show_charts", False)
+    st.session_state.setdefault("show_map", True)
     st.session_state.setdefault("analysis", None if has_real_copernicus() else _default_analysis())
     st.session_state.setdefault(
         "selected_pond",
@@ -99,6 +100,46 @@ def _ensure_session() -> None:
         st.session_state["selected_pond"] = None
 
 
+def _create_map(location: tuple[float, float]) -> Any:
+    """Share the same dark basemap and readable controls in both map views."""
+    import folium
+
+    map_obj = folium.Map(
+        location=location, zoom_start=14, tiles=None,
+        control_scale=True, scrollWheelZoom=False,
+    )
+    # Style only the base tiles, preserving the colors of polygons and controls.
+    folium.TileLayer("OpenStreetMap", class_name="pond-basemap").add_to(map_obj)
+    map_obj.get_root().header.add_child(folium.Element("""
+        <style>
+        .leaflet-container { background: #101b2b; font-family: system-ui, sans-serif; }
+        .pond-basemap { filter: invert(1) hue-rotate(180deg) saturate(.65) brightness(.85) contrast(.9); }
+        .leaflet-bar { border: 1px solid #475569 !important; border-radius: 8px; overflow: hidden; }
+        .leaflet-bar a, .leaflet-bar a:hover { background: #182638; color: #f1f5f9; border-color: #475569; }
+        .leaflet-control-attribution { background: #101b2bea !important; color: #cbd5e1; }
+        .leaflet-control-attribution a { color: #7dd3fc; }
+        .leaflet-control-scale-line { background: #101b2bea; color: #e2e8f0; border-color: #94a3b8; }
+        .leaflet-tooltip, .leaflet-popup-content-wrapper, .leaflet-popup-tip {
+            background: #182638; color: #f1f5f9; border-color: #475569;
+        }
+        .leaflet-tooltip { border-radius: 8px; padding: 8px 12px; }
+        .pond-marker {
+            display: grid; place-items: center; width: 28px; height: 28px;
+            border: 2px solid #e2e8f0; border-radius: 50%; color: #0b1120;
+            font-size: 13px; font-weight: 800; box-shadow: 0 2px 12px #0008;
+        }
+        </style>
+    """))
+    return map_obj
+
+
+def _display_map(map_obj: Any, key: str) -> None:
+    st_folium(
+        map_obj, height=360, use_container_width=True,
+        returned_objects=[], key=key,
+    )
+
+
 def _render_map(geometry: dict[str, Any] | None, pond_name: str) -> None:
     if not geometry:
         st.info("No polygon is available to display on the map.")
@@ -110,14 +151,18 @@ def _render_map(geometry: dict[str, Any] | None, pond_name: str) -> None:
 
     import folium
 
-    m = folium.Map(location=[location["latitude"], location["longitude"]], zoom_start=14, tiles="OpenStreetMap")
+    m = _create_map((location["latitude"], location["longitude"]))
     layer = folium.GeoJson(
         geometry, tooltip=escape(pond_name),
-        style_function=lambda _: {"color": "green", "fillOpacity": 0.4},
+        style_function=lambda _: {
+            "color": "#67e8f9", "weight": 3,
+            "fillColor": "#22d3ee", "fillOpacity": 0.28,
+        },
+        highlight_function=lambda _: {"weight": 4, "fillOpacity": 0.4},
     ).add_to(m)
-    m.fit_bounds(layer.get_bounds())
-    st_folium(m, width=700, height=420)
-    st.caption(f"Map: {pond_name}")
+    m.fit_bounds(layer.get_bounds(), padding=(35, 35), max_zoom=16)
+    _display_map(m, "selected_pond_map")
+    st.caption(f"Cyan outline · {pond_name} · Scroll the page; use + / − to zoom the map.")
 
 
 def _pond_option_label(pond: dict[str, Any], index: int) -> str:
@@ -152,30 +197,38 @@ def _render_candidate_map(ponds: list[dict[str, Any]]) -> None:
         sum(item[3][0] for item in candidates) / len(candidates),
         sum(item[3][1] for item in candidates) / len(candidates),
     )
-    map_obj = folium.Map(location=center, zoom_start=14, tiles="OpenStreetMap")
-    colors = ["blue", "red", "green", "purple", "orange", "darkred", "cadetblue"]
+    map_obj = _create_map(center)
+    colors = ["#67e8f9", "#fda4af", "#6ee7b7", "#c4b5fd", "#fcd34d", "#fb923c", "#93c5fd"]
     all_points: list[tuple[float, float]] = []
     for index, pond, geometry, location in candidates:
         color = colors[index % len(colors)]
         label = _pond_option_label(pond, index)
         layer = folium.GeoJson(
             geometry,
-            style_function=lambda _, color=color: {"color": color, "fillColor": color, "fillOpacity": 0.35},
+            style_function=lambda _, color=color: {
+                "color": color, "weight": 3, "fillColor": color, "fillOpacity": 0.25,
+            },
             tooltip=escape(label),
         ).add_to(map_obj)
         folium.Marker(
             location=location,
             tooltip=f"Candidate {index + 1}",
             popup=escape(label),
-            icon=folium.Icon(color=color, icon="info-sign"),
+            icon=folium.DivIcon(
+                html=f'<span class="pond-marker" style="background:{color}">{index + 1}</span>',
+                icon_size=(28, 28), icon_anchor=(14, 14),
+            ),
         ).add_to(map_obj)
         all_points.extend(tuple(point) for point in layer.get_bounds())
 
     if all_points:
         latitudes = [point[0] for point in all_points]
         longitudes = [point[1] for point in all_points]
-        map_obj.fit_bounds([[min(latitudes), min(longitudes)], [max(latitudes), max(longitudes)]])
-    st_folium(map_obj, width=700, height=420)
+        map_obj.fit_bounds(
+            [[min(latitudes), min(longitudes)], [max(latitudes), max(longitudes)]],
+            padding=(35, 35), max_zoom=16,
+        )
+    _display_map(map_obj, "candidate_pond_map")
 
 
 def _render_pond_picker() -> None:
@@ -186,7 +239,8 @@ def _render_pond_picker() -> None:
 
     st.subheader("Choose a water body")
     st.caption("Polygons and markers on the map match the candidates in the list. Hover or click to see details.")
-    _render_candidate_map(ponds)
+    if st.checkbox("Show candidate map", value=True, key="show_candidate_map"):
+        _render_candidate_map(ponds)
     selected_index = st.selectbox(
         "Water body by area and approximate location",
         options=range(len(ponds)),
@@ -215,80 +269,70 @@ def _render_pond_picker() -> None:
 # ---------------------------------------------------------------------------
 # CSS injection for card-based analytics widget
 # ---------------------------------------------------------------------------
-_CARD_CSS = """
+_WIDGET_CSS = """
 <style>
-.analytics-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-    gap: 1rem;
-    margin: 1rem 0 1.5rem;
+.stApp { background: #0b1120; color: #e2e8f0; }
+[data-testid="stMainBlockContainer"] { max-width: 1600px; padding-top: 2rem; }
+.st-key-visual_workspace, .st-key-report, .st-key-pond_details {
+    background: #111c2e;
+    border: 1px solid #2b3b52;
+    border-radius: 20px;
+    padding: 1.25rem;
+    box-shadow: 0 12px 32px #02061726;
 }
-.analytics-card {
-    background: var(--ag-card-bg, #ffffff);
-    border-radius: 16px;
-    padding: 1.1rem 1.2rem 1rem;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
-    border: 1px solid rgba(0,0,0,0.06);
-    transition: box-shadow 0.2s ease, transform 0.15s ease;
+.st-key-visual_workspace { border-top: 2px solid #38bdf8; }
+.st-key-visual_workspace [data-testid="stCaptionContainer"],
+.st-key-pond_details [data-testid="stCaptionContainer"] { color: #a8b8cd; }
+.st-key-visual_workspace [data-testid="stTabs"] [role="tablist"] {
+    border-bottom: 1px solid #2b3b52;
 }
-.analytics-card:hover {
-    box-shadow: 0 4px 14px rgba(0,0,0,0.10);
-    transform: translateY(-1px);
+.st-key-visual_workspace iframe { border: 1px solid #33465e; border-radius: 12px; }
+.st-key-visual_workspace [data-testid="stExpander"] {
+    border: 1px solid #33465e; border-radius: 12px; background: #142034;
 }
-.card-header {
-    display: flex;
-    align-items: center;
-    gap: 0.45rem;
-    margin-bottom: 0.3rem;
+/* Each native container encloses the title, sparkline AND statistics. */
+[class*="st-key-metric_"] {
+    background: #182638;
+    border: 1px solid #33465e;
+    border-radius: 14px;
+    padding: .85rem;
+    box-shadow: 0 4px 12px #02061726;
 }
-.card-icon {
-    font-size: 1.15rem;
-    line-height: 1;
-}
-.card-title {
-    font-size: 0.82rem;
-    font-weight: 600;
-    color: var(--ag-card-title, #475569);
-    letter-spacing: 0.01em;
-}
-.stat-row {
-    display: flex;
-    justify-content: space-between;
-    align-items: baseline;
-    padding: 0.15rem 0;
-}
-.stat-label {
-    font-size: 0.7rem;
-    color: var(--ag-stat-label, #94a3b8);
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    font-weight: 500;
-}
-.stat-value {
-    font-size: 1rem;
-    font-weight: 600;
-    color: var(--ag-stat-value, #1e293b);
-}
-.trend-up { color: #10b981; }
-.trend-down { color: #ef4444; }
-.trend-flat { color: #94a3b8; }
-/* dark-mode overrides (Streamlit dark theme) */
-@media (prefers-color-scheme: dark) {
-    .analytics-card {
-        --ag-card-bg: #1e1e2e;
-        --ag-card-title: #cbd5e1;
-        --ag-stat-label: #64748b;
-        --ag-stat-value: #e2e8f0;
-        border-color: rgba(255,255,255,0.07);
+.card-header { display: flex; align-items: center; gap: .45rem; }
+.card-icon { font-size: 1rem; line-height: 1; }
+.card-title { font-size: .85rem; font-weight: 600; color: #e2e8f0; }
+.stat-row { display: flex; justify-content: space-between; gap: .5rem; padding: .12rem 0; }
+.stat-label { font-size: .72rem; color: #a8b8cd; }
+.stat-value { font-size: .8rem; font-weight: 600; color: #f1f5f9; text-align: right; }
+.trend-up { color: #6ee7b7; }
+.trend-down { color: #fda4af; }
+.trend-flat { color: #cbd5e1; }
+/* The document scrolls separately from the visual dock on wide screens. */
+@media (min-width: 1100px) {
+    [data-testid="stColumn"]:has(.st-key-visual_workspace) {
+        position: sticky;
+        top: 4.5rem;
+        align-self: flex-start;
+    }
+    .st-key-visual_workspace {
+        max-height: calc(100dvh - 10rem);
+        overflow-y: auto;
+        scrollbar-width: thin;
+        scrollbar-color: #475569 #111c2e;
+        scrollbar-gutter: stable;
     }
 }
-[data-testid="stAppViewContainer"][data-theme="dark"] .analytics-card,
-.stApp[data-theme="dark"] .analytics-card {
-    --ag-card-bg: #1e1e2e;
-    --ag-card-title: #cbd5e1;
-    --ag-stat-label: #64748b;
-    --ag-stat-value: #e2e8f0;
-    border-color: rgba(255,255,255,0.07);
+@media (max-width: 1099px) {
+    [data-testid="stHorizontalBlock"]:has(> [data-testid="stColumn"] .st-key-visual_workspace) {
+        flex-direction: column;
+    }
+    [data-testid="stColumn"]:has(.st-key-reading_workspace),
+    [data-testid="stColumn"]:has(.st-key-visual_workspace) {
+        width: 100%; flex: 1 1 100%;
+    }
+}
+@media (max-width: 600px) {
+    .st-key-visual_workspace, .st-key-report, .st-key-pond_details { padding: .85rem; }
 }
 </style>
 """
@@ -386,7 +430,7 @@ def _detail_chart(
             y=values,
             mode="lines+markers",
             line=dict(color=pal["line"], width=2.5, shape="spline", smoothing=1.3),
-            marker=dict(size=7, color=pal["line"], line=dict(width=1.5, color="white")),
+            marker=dict(size=7, color=pal["line"], line=dict(width=1.5, color="#111c2e")),
             fill="tozeroy",
             fillcolor=pal["fill"],
             hovertemplate="%{x|%d %b %Y}<br><b>%{y:.3f}</b><extra></extra>",
@@ -413,8 +457,8 @@ def _detail_chart(
             x=dates[min_idx], y=values[min_idx],
             text=f"Min {values[min_idx]:.3g}",
             showarrow=True, arrowhead=0, arrowcolor="#94a3b8",
-            font=dict(size=10, color="#64748b"),
-            bgcolor="white", bordercolor="#e2e8f0", borderwidth=1, borderpad=3,
+            font=dict(size=10, color="#e2e8f0"),
+            bgcolor="#182638", bordercolor="#475569", borderwidth=1, borderpad=3,
             ay=30,
         )
         if max_idx != min_idx:
@@ -422,8 +466,8 @@ def _detail_chart(
                 x=dates[max_idx], y=values[max_idx],
                 text=f"Max {values[max_idx]:.3g}",
                 showarrow=True, arrowhead=0, arrowcolor="#94a3b8",
-                font=dict(size=10, color="#64748b"),
-                bgcolor="white", bordercolor="#e2e8f0", borderwidth=1, borderpad=3,
+                font=dict(size=10, color="#e2e8f0"),
+                bgcolor="#182638", bordercolor="#475569", borderwidth=1, borderpad=3,
                 ay=-30,
             )
 
@@ -433,15 +477,18 @@ def _detail_chart(
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
         xaxis=dict(
-            showgrid=True, gridcolor="rgba(0,0,0,0.04)", gridwidth=1,
+            showgrid=True, gridcolor="rgba(148,163,184,0.15)", gridwidth=1,
             title=None,
-            rangeslider=dict(visible=True, thickness=0.06),
+            rangeslider=dict(visible=True, thickness=0.06, bgcolor="#182638"),
+            zerolinecolor="#475569",
         ),
         yaxis=dict(
-            showgrid=True, gridcolor="rgba(0,0,0,0.04)", gridwidth=1,
-            title=dict(text=y_label, font=dict(size=11, color="#94a3b8")),
+            showgrid=True, gridcolor="rgba(148,163,184,0.15)", gridwidth=1,
+            title=dict(text=y_label, font=dict(size=11, color="#cbd5e1")),
+            zerolinecolor="#475569",
         ),
-        font=dict(family="Inter, system-ui, -apple-system, sans-serif"),
+        font=dict(family="Inter, system-ui, -apple-system, sans-serif", color="#cbd5e1"),
+        hoverlabel=dict(bgcolor="#182638", bordercolor="#475569", font_color="#f1f5f9"),
         showlegend=False,
         hovermode="x unified",
     )
@@ -462,8 +509,6 @@ def _fmt(value: float | None, suffix: str = "", precision: int = 3) -> str:
 
 def _render_analytics_widget(analysis: dict[str, Any]) -> None:
     """Render the 4–5 metric preview cards + click-to-expand detail charts."""
-
-    st.markdown(_CARD_CSS, unsafe_allow_html=True)
 
     timeseries = analysis.get("timeseries") or []
     algae = analysis.get("algae") or {}
@@ -582,39 +627,32 @@ def _render_analytics_widget(analysis: dict[str, Any]) -> None:
         st.info("No valid metric data found in the satellite observations.")
         return
 
-    # ── Render preview cards (HTML grid with sparklines) ───────────────
+    st.markdown("#### Analytics overview")
+    st.caption("Preview the trends, then expand a metric for the interactive chart.")
 
-    st.markdown("#### 📊 Analytics overview")
-
-    cols = st.columns(len(cards_config))
-    for idx, card in enumerate(cards_config):
-        with cols[idx]:
-            # Card header + stats as HTML
-            stats_html = "".join(
-                f'<div class="stat-row"><span class="stat-label">{label}</span>'
-                f'<span class="stat-value">{value}</span></div>'
-                for label, value in card["stats"]
-            )
-            st.markdown(
-                f'<div class="analytics-card">'
-                f'<div class="card-header">'
-                f'<span class="card-icon">{card["icon"]}</span>'
-                f'<span class="card-title">{card["title"]}</span>'
-                f'</div>'
-                f'</div>',
-                unsafe_allow_html=True,
-            )
-            # Sparkline (Plotly, no config toolbar)
-            spark = _sparkline_figure(card["dates"], card["values"], card["key"])
-            st.plotly_chart(spark, use_container_width=True, config={"displayModeBar": False})
-            # Stats
-            st.markdown(
-                f'<div>{stats_html}</div>',
-                unsafe_allow_html=True,
-            )
+    for offset in range(0, len(cards_config), 2):
+        cols = st.columns(2)
+        for col, card in zip(cols, cards_config[offset:offset + 2]):
+            with col, st.container(key=f"metric_{card['key']}"):
+                stats_html = "".join(
+                    f'<div class="stat-row"><span class="stat-label">{label}</span>'
+                    f'<span class="stat-value">{value}</span></div>'
+                    for label, value in card["stats"]
+                )
+                st.markdown(
+                    f'<div class="card-header">'
+                    f'<span class="card-icon">{card["icon"]}</span>'
+                    f'<span class="card-title">{card["title"]}</span></div>',
+                    unsafe_allow_html=True,
+                )
+                spark = _sparkline_figure(card["dates"], card["values"], card["key"])
+                st.plotly_chart(
+                    spark, use_container_width=True, theme=None,
+                    config={"displayModeBar": False, "scrollZoom": False},
+                )
+                st.markdown(f'<div>{stats_html}</div>', unsafe_allow_html=True)
 
     # ── Expandable detail charts ──────────────────────────────────────
-    st.markdown("---")
     for card in cards_config:
         with st.expander(f"{card['icon']}  {card['title']} — detailed chart", expanded=False):
             detail = _detail_chart(
@@ -624,7 +662,10 @@ def _render_analytics_widget(analysis: dict[str, Any]) -> None:
                 card["y_label"],
                 **card["detail_extra"],
             )
-            st.plotly_chart(detail, use_container_width=True)
+            st.plotly_chart(
+                detail, use_container_width=True, theme=None,
+                config={"displaylogo": False, "scrollZoom": False},
+            )
             # Extra context per metric
             if card["key"] == "ndci":
                 interp = algae.get("interpretation")
@@ -642,6 +683,7 @@ st.set_page_config(page_title=APP_TITLE, page_icon="🌊", layout="wide")
 
 def main() -> None:
     _ensure_session()
+    st.markdown(_WIDGET_CSS, unsafe_allow_html=True)
 
     st.title(APP_TITLE)
     st.caption(APP_SUBTITLE)
@@ -661,90 +703,124 @@ def main() -> None:
         if not has_real_copernicus():
             st.info("Add API credentials to api/featherless.txt and api/copernicus.txt, then restart the app.")
 
-    if "messages" in st.session_state and st.session_state["messages"]:
+    # A top-level chat input uses Streamlit's fixed bottom composer.
+    prompt = st.chat_input("Ask in English or Czech, e.g. 'Analyze ponds in Řitka for 2025.'")
+
+    reading_column, visual_column = st.columns([1, 1.15], gap="large")
+    with reading_column, st.container(key="reading_workspace"):
+        st.subheader("Conversation & report")
+        st.caption("Ask a question or explore the analysis. Maps and charts have their own panel.")
         for message in st.session_state["messages"]:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
 
-    if prompt := st.chat_input("Ask in English or Czech, e.g. 'Analyze ponds in Řitka for 2025.'"):
-        st.session_state["messages"].append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
+        if prompt:
+            st.session_state["messages"].append({"role": "user", "content": prompt})
+            with st.chat_message("user"):
+                st.markdown(prompt)
 
-        with _pond_thinking("Understanding your request and preparing the analysis…"):
-            result = run_agent(prompt, st.session_state)
-        if result.get("status") == "awaiting_choice":
-            st.session_state["analysis"] = None
-            st.session_state["selected_pond"] = None
-        elif result.get("analysis") is not None:
-            st.session_state["analysis"] = result["analysis"]
-        if result.get("selected_pond") is not None:
-            st.session_state["selected_pond"] = result["selected_pond"]
-        st.session_state["messages"].append({"role": "assistant", "content": result["response"]})
-        with st.chat_message("assistant"):
-            st.markdown(result["response"])
+            with _pond_thinking("Understanding your request and preparing the analysis…"):
+                result = run_agent(prompt, st.session_state)
+            if result.get("status") == "awaiting_choice":
+                st.session_state["analysis"] = None
+                st.session_state["selected_pond"] = None
+            elif result.get("analysis") is not None:
+                st.session_state["analysis"] = result["analysis"]
+            if result.get("selected_pond") is not None:
+                st.session_state["selected_pond"] = result["selected_pond"]
+            st.session_state["messages"].append({"role": "assistant", "content": result["response"]})
+            with st.chat_message("assistant"):
+                st.markdown(result["response"])
 
-    _render_pond_picker()
+        if st.session_state.get("ai_note"):
+            st.caption(st.session_state["ai_note"])
 
-    if st.session_state.get("ai_note"):
-        st.caption(st.session_state["ai_note"])
+        analysis = st.session_state.get("analysis")
+        selected_pond = st.session_state.get("selected_pond")
+        if analysis and selected_pond:
+            with st.container(key="report"):
+                st.subheader("Plain-language report")
+                st.markdown(analysis.get("report", "The report is not available for this analysis."))
+            with st.expander("Measurement quality and limitations"):
+                quality = analysis.get("quality_summary", {})
+                st.write(f"- Valid pixels: {quality.get('valid_pixels', 'not reported')}")
+                st.write(f"- Data availability: {quality.get('data_quality', 'unknown')}")
+                st.write(f"- Limitations: {quality.get('limitations', 'No specific limitations reported.')}")
+                st.write(f"- AI/data note: {analysis.get('warning', 'No additional notes.')}")
+        else:
+            st.info("Enter a request here. Results appear after selecting a water body and completing the satellite analysis.")
 
-    analysis = st.session_state.get("analysis")
-    selected_pond = st.session_state.get("selected_pond")
-    if not analysis or not selected_pond:
-        st.info("Enter a request in the chat above. Results appear after selecting a water body and completing the satellite analysis.")
-        return
+    with visual_column, st.container(key="visual_workspace"):
+        st.subheader("Visual workspace")
+        if st.session_state.get("pending_candidates"):
+            _render_pond_picker()
+        elif analysis and selected_pond:
+            st.markdown(f"**{selected_pond.get('name', 'Unknown water body')}**")
+            date_from, date_to = analysis.get("date_from"), analysis.get("date_to")
+            if date_from and date_to:
+                st.caption(f"{date_from} → {date_to}")
+            map_control, chart_control = st.columns(2)
+            with map_control:
+                show_map = st.checkbox("Show map", key="show_map")
+            with chart_control:
+                show_charts = st.checkbox("Show analytics charts", key="show_charts")
 
-    st.subheader(f"Selected water body: {selected_pond.get('name', 'Unknown water body')}")
-    col_map, col_meta = st.columns([2, 1])
-    with col_map:
-        _render_map(
-            analysis.get("geometry")
-            or selected_pond.get("geometry")
-            or demo_data.DEMO_PONDS.get(selected_pond.get("pond_id"), {}).get("geometry"),
-            selected_pond.get("name", "Water body"),
-        )
-    with col_meta:
-        st.write(f"ID: {selected_pond.get('pond_id', 'unknown')}")
-        st.write(f"Type: {selected_pond.get('water_body_type', 'water body')}")
-        st.write(f"Municipality: {selected_pond.get('municipality', 'unknown')}")
-        st.write(f"Area: {selected_pond.get('area_m2', 'unknown')} m²")
-        st.write(f"Data quality: {analysis.get('quality_summary', {}).get('data_quality', 'unknown')}")
-        st.write(f"Reliability: {analysis.get('quality_summary', {}).get('reliability', 'unknown')}")
+            views = []
+            if show_charts:
+                views.append("Analytics")
+            if show_map:
+                views.append("Map")
+            if views:
+                tabs = st.tabs(views)
+                for name, tab in zip(views, tabs):
+                    with tab:
+                        if name == "Map":
+                            _render_map(
+                                analysis.get("geometry")
+                                or selected_pond.get("geometry")
+                                or demo_data.DEMO_PONDS.get(selected_pond.get("pond_id"), {}).get("geometry"),
+                                selected_pond.get("name", "Water body"),
+                            )
+                            with st.container(key="pond_details"):
+                                st.caption("WATER BODY DETAILS")
+                                st.write(
+                                    f"Type: {selected_pond.get('water_body_type', 'water body')} · "
+                                    f"Municipality: {selected_pond.get('municipality', 'unknown')}"
+                                )
+                                st.write(f"Area: {selected_pond.get('area_m2', 'unknown')} m²")
+                                quality = analysis.get("quality_summary", {})
+                                st.caption(
+                                    f"Data quality: {quality.get('data_quality', 'unknown')} · "
+                                    f"Reliability: {quality.get('reliability', 'unknown')}"
+                                )
+                        else:
+                            _render_analytics_widget(analysis)
+            else:
+                st.caption("Visualizations are hidden. Enable the map or analytics above to display them.")
+        else:
+            st.caption("Your map and chart previews will appear here once a water body is selected.")
 
-    st.subheader("Plain-language report")
-    st.markdown(analysis.get("report", "The report is not available for this analysis."))
-
-    series = analysis.get("timeseries") or []
-    if series:
-        if st.checkbox("Show analytics charts", key="show_charts"):
-            _render_analytics_widget(analysis)
-
-        if st.checkbox("Show measurements table", key="show_table", value=False):
-            df = pd.DataFrame(series)
-            st.subheader("Measurements")
-            columns = [
-                column
-                for column in ("date", "ndwi", "ndti", "ndci", "water_percent", "ice_percent", "valid_pixels")
-                if column in df
-            ]
-            st.dataframe(df[columns], use_container_width=True)
-
-        if st.checkbox("Show chart interpretation", key="show_interp", value=False):
-            st.subheader("Chart interpretation")
-            st.markdown(
-                analysis.get("graph_interpretation")
-                or _fallback_chart_interpretation(analysis, analysis.get("algae", {}))
-            )
-    else:
-        st.info("No observations are available. Submit a new request to run another analysis.")
-
-    st.subheader("Measurement quality and limitations")
-    quality = analysis.get("quality_summary", {})
-    st.write(f"- Valid pixels: {quality.get('valid_pixels', 'not reported')}")
-    st.write(f"- Data availability: {quality.get('data_quality', 'unknown')}")
-    st.write(f"- Limitations: {quality.get('limitations', 'No specific limitations reported.')}")
-    st.write(f"- AI/data note: {analysis.get('warning', 'No additional notes.')}")
+    if analysis and selected_pond:
+        with reading_column:
+            series = analysis.get("timeseries") or []
+            if series:
+                if st.checkbox("Show measurements table", key="show_table", value=False):
+                    df = pd.DataFrame(series)
+                    st.subheader("Measurements")
+                    columns = [
+                        column
+                        for column in ("date", "ndwi", "ndti", "ndci", "water_percent", "ice_percent", "valid_pixels")
+                        if column in df
+                    ]
+                    st.dataframe(df[columns], use_container_width=True)
+                if st.checkbox("Show chart interpretation", key="show_interp", value=False):
+                    st.subheader("Chart interpretation")
+                    st.markdown(
+                        analysis.get("graph_interpretation")
+                        or _fallback_chart_interpretation(analysis, analysis.get("algae", {}))
+                    )
+            else:
+                st.info("No observations are available. Submit a new request to run another analysis.")
 
 
 main()
