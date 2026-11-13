@@ -5,7 +5,6 @@ from typing import Any
 import pandas as pd
 import plotly.express as px
 import streamlit as st
-from folium import Polygon
 from streamlit_folium import st_folium
 
 from scripts import demo_data
@@ -51,6 +50,107 @@ def _render_map(geometry: dict[str, Any] | None, pond_name: str) -> None:
     folium.Polygon(locations=[[point[1], point[0]] for point in shape], color="green", fill=True, fill_opacity=0.4, tooltip=pond_name).add_to(m)
     st_folium(m, width=700, height=420)
     st.caption(f"Mapa: {pond_name}")
+
+
+def _pond_option_label(pond: dict[str, Any], index: int) -> str:
+    name = pond.get("name") or "Bezejmenný rybník"
+    area = int(pond.get("area_m2") or 0)
+    area_text = f"{area:,}".replace(",", " ")
+    hectares = f"{area / 10_000:.2f}".replace(".", ",")
+    location = pond.get("approx_location") or {}
+    location_text = ""
+    if location.get("latitude") is not None and location.get("longitude") is not None:
+        location_text = f" · přibližně {location['latitude']:.4f}° N, {location['longitude']:.4f}° E"
+    return f"{index + 1}. {name} · {area_text} m² ({hectares} ha){location_text}"
+
+
+def _render_candidate_map(ponds: list[dict[str, Any]]) -> None:
+    import folium
+
+    candidates: list[tuple[int, dict[str, Any], list[list[float]], tuple[float, float]]] = []
+    for index, pond in enumerate(ponds):
+        geometry = pond.get("geometry") or {}
+        coordinates = geometry.get("coordinates") or []
+        if not coordinates or not coordinates[0]:
+            continue
+        ring = coordinates[0]
+        points = [point for point in ring if isinstance(point, (list, tuple)) and len(point) >= 2]
+        if not points:
+            continue
+        location = pond.get("approx_location") or {}
+        longitude = location.get("longitude", sum(float(point[0]) for point in points) / len(points))
+        latitude = location.get("latitude", sum(float(point[1]) for point in points) / len(points))
+        candidates.append((index, pond, points, (float(latitude), float(longitude))))
+
+    if not candidates:
+        st.info("Pro kandidáty nejsou dostupné polygony k zobrazení na mapě.")
+        return
+
+    center = (
+        sum(item[3][0] for item in candidates) / len(candidates),
+        sum(item[3][1] for item in candidates) / len(candidates),
+    )
+    map_obj = folium.Map(location=center, zoom_start=14, tiles="OpenStreetMap")
+    colors = ["blue", "red", "green", "purple", "orange", "darkred", "cadetblue"]
+    all_points: list[tuple[float, float]] = []
+    for index, pond, ring, location in candidates:
+        color = colors[index % len(colors)]
+        label = _pond_option_label(pond, index)
+        folium.Polygon(
+            locations=[[float(point[1]), float(point[0])] for point in ring],
+            color=color,
+            fill=True,
+            fill_color=color,
+            fill_opacity=0.35,
+            tooltip=label,
+        ).add_to(map_obj)
+        folium.Marker(
+            location=location,
+            tooltip=f"Kandidát {index + 1}",
+            popup=label,
+            icon=folium.Icon(color=color, icon="info-sign"),
+        ).add_to(map_obj)
+        all_points.extend((float(point[1]), float(point[0])) for point in ring)
+
+    if all_points:
+        latitudes = [point[0] for point in all_points]
+        longitudes = [point[1] for point in all_points]
+        map_obj.fit_bounds([[min(latitudes), min(longitudes)], [max(latitudes), max(longitudes)]])
+    st_folium(map_obj, width=700, height=420)
+
+
+def _render_pond_picker() -> None:
+    ponds = st.session_state.get("pending_ponds") or []
+    options = st.session_state.get("pending_candidates") or []
+    if not ponds or not options:
+        return
+
+    st.subheader("Vyberte rybník")
+    st.caption("Polygony a značky na mapě odpovídají kandidátům v seznamu. Najetím nebo kliknutím zobrazíte jejich popisek.")
+    _render_candidate_map(ponds)
+    selected_index = st.selectbox(
+        "Rybník podle plochy a přibližné polohy",
+        options=range(len(ponds)),
+        format_func=lambda index: _pond_option_label(ponds[index], index),
+        key="pond_candidate_selection",
+    )
+    if st.button("Vybrat rybník a pokračovat", key="select_pond_candidate"):
+        pond = ponds[selected_index]
+        candidate = next(
+            (item for item in options if item.get("pond_id") == pond.get("pond_id")),
+            options[selected_index],
+        )
+        with st.spinner("Připravuji analýzu vybraného rybníka…"):
+            result = run_agent(str(candidate["number"]), st.session_state)
+        st.session_state["analysis"] = result.get("analysis")
+        st.session_state["selected_pond"] = result.get("selected_pond") or pond
+        st.session_state["messages"].append(
+            {"role": "user", "content": f"Vybral/a jsem: {_pond_option_label(pond, selected_index)}"}
+        )
+        st.session_state["messages"].append(
+            {"role": "assistant", "content": result["response"]}
+        )
+        st.rerun()
 
 
 def _render_line_chart(df: pd.DataFrame, metric: str, title: str, color: str) -> None:
@@ -109,11 +209,18 @@ def main() -> None:
 
         with st.spinner("Přemýšlím a připravuji analýzu…"):
             result = run_agent(prompt, st.session_state)
-        st.session_state["analysis"] = result.get("analysis") or st.session_state["analysis"]
-        st.session_state["selected_pond"] = result.get("selected_pond") or st.session_state["selected_pond"]
+        if result.get("status") == "awaiting_choice":
+            st.session_state["analysis"] = None
+            st.session_state["selected_pond"] = None
+        elif result.get("analysis") is not None:
+            st.session_state["analysis"] = result["analysis"]
+        if result.get("selected_pond") is not None:
+            st.session_state["selected_pond"] = result["selected_pond"]
         st.session_state["messages"].append({"role": "assistant", "content": result["response"]})
         with st.chat_message("assistant"):
             st.markdown(result["response"])
+
+    _render_pond_picker()
 
     analysis = st.session_state.get("analysis")
     selected_pond = st.session_state.get("selected_pond")

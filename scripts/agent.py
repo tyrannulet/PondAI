@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
-from datetime import date, timedelta
+import calendar
+from datetime import date
 from typing import Any
 
 from scripts.config import get_featherless_config, has_real_featherless
@@ -22,12 +24,27 @@ MUNICIPALITY_ALIASES = {
     "mb": "Mladá Boleslav",
     "mladé boleslavi": "Mladá Boleslav",
 }
+MONTH_COUNTS = {
+    "jeden": 1,
+    "jednu": 1,
+    "dva": 2,
+    "dvě": 2,
+    "tri": 3,
+    "tři": 3,
+    "třech": 3,
+    "čtyři": 4,
+    "ctyri": 4,
+    "pět": 5,
+    "pet": 5,
+}
 
 try:
-    from openai import OpenAI
-except Exception:  # pragma: no cover
+    from openai import OpenAI, OpenAIError
+except ImportError:  # pragma: no cover
     OpenAI = None
+    OpenAIError = Exception
 
+LOGGER = logging.getLogger(__name__)
 
 def _extract_years(text: str) -> list[str]:
     return re.findall(r"\b(20\d{2})\b", text)
@@ -42,15 +59,69 @@ def _extract_date_range(prompt: str) -> tuple[str | None, str | None]:
         start_year = years[0]
         end_year = years[-1]
         return f"{start_year}-01-01", f"{end_year}-12-31"
-    if re.search(r"\bposledn(?:í|ím)\s+měsíc", prompt, flags=re.IGNORECASE):
+    month_match = re.search(
+        r"\bposledn(?:í|ím|ích)\s+(?:(\d+|jeden|jednu|dva|dvě|tri|tři|třech|čtyři|ctyri|pět|pet)\s+)?měsíc(?:e|ů)?\b",
+        prompt,
+        flags=re.IGNORECASE,
+    )
+    if month_match:
+        count = month_match.group(1)
+        month_count = int(count) if count and count.isdigit() else MONTH_COUNTS.get((count or "jeden").casefold(), 1)
         end = date.today()
-        return (end - timedelta(days=30)).isoformat(), end.isoformat()
+        month_index = end.year * 12 + end.month - 1 - month_count
+        year, month = divmod(month_index, 12)
+        start = date(year, month + 1, min(end.day, calendar.monthrange(year, month + 1)[1]))
+        return start.isoformat(), end.isoformat()
     return None, None
 
 
 def _canonicalize_municipality(name: str) -> str:
     cleaned = re.sub(r"\s+", " ", name).strip(" \t\r\n.,;:!?")
     return MUNICIPALITY_ALIASES.get(cleaned.casefold(), cleaned)
+
+
+def _normalize_municipality_with_featherless(name: str) -> str | None:
+    config = get_featherless_config()
+    if not has_real_featherless() or OpenAI is None:
+        return None
+
+    client = OpenAI(
+        base_url=config.get("FEATHERLESS_BASE_URL", "https://api.featherless.ai/v1"),
+        api_key=config["FEATHERLESS_API_KEY"],
+        timeout=30,
+    )
+    try:
+        response = client.chat.completions.create(
+            model=config.get("FEATHERLESS_MODEL", "Qwen/Qwen3-32B"),
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Normalizuj pouze předaný název české obce do úředního základního "
+                        "tvaru používaného v RÚIAN. Oprav skloňování (např. Řitce → Řitka), "
+                        "známé zkratky a místní názvy (např. Valmez → Valašské Meziříčí). "
+                        "Nevymýšlej obec. Vrať pouze JSON objekt {\"municipality\": \"...\"}; "
+                        "pokud si nejsi jistý, vrať {\"municipality\": null}."
+                    ),
+                },
+                {"role": "user", "content": name},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0,
+            max_tokens=80,
+        )
+        content = response.choices[0].message.content
+        result = json.loads(content or "{}")
+        municipality = result.get("municipality")
+        if not isinstance(municipality, str) or not municipality.strip():
+            return None
+        return _canonicalize_municipality(municipality)
+    except (OpenAIError, json.JSONDecodeError, ValueError, TypeError, IndexError) as exc:
+        LOGGER.warning(
+            "Featherless municipality normalization failed (%s); using local normalization.",
+            type(exc).__name__,
+        )
+        return None
 
 
 def _extract_municipality(prompt: str) -> str | None:
@@ -93,7 +164,52 @@ def _ndci_summary(algae: dict[str, Any]) -> str:
     return str(first) if first is not None else "n/a"
 
 
-def _call_featherless_tools(prompt: str, state: dict[str, Any] | None = None) -> dict[str, Any]:
+def _describe_candidate(candidate: dict[str, Any], index: int) -> str:
+    number = candidate.get("number", index + 1)
+    name = candidate.get("name") or "Bezejmenný rybník"
+    area = int(candidate.get("area_m2") or 0)
+    area_text = f"{area:,}".replace(",", " ")
+    hectares = f"{area / 10_000:.2f}".replace(".", ",")
+    location = candidate.get("approx_location") or {}
+    location_text = ""
+    if location.get("latitude") is not None and location.get("longitude") is not None:
+        location_text = (
+            f", přibližně {location['latitude']:.4f}° N, "
+            f"{location['longitude']:.4f}° E"
+        )
+    return f"{number}. {name} — {area_text} m² ({hectares} ha){location_text}"
+
+
+def _analyze_selected_pond(
+    pond: dict[str, Any], date_from: str, date_to: str
+) -> dict[str, Any]:
+    analysis = analyze_pond(pond["pond_id"], date_from, date_to)
+    algae = analyze_algae_bloom(pond["pond_id"], date_from, date_to)
+    metrics = analysis.get("metrics", {})
+    response = (
+        f"Vyhodnocení rybníka {pond['name']} ({pond.get('area_m2', 'neznámá')} m²) "
+        f"pro období {date_from} až {date_to}.\n"
+        f"{analysis.get('warning', '')}\n"
+        f"Průměrný NDWI: {metrics.get('average_ndwi', 'n/a')}\n"
+        f"Průměrný NDTI: {metrics.get('average_ndti', 'n/a')}\n"
+        f"Průměrný NDCI: {_ndci_summary(algae)}\n"
+        f"{algae.get('interpretation', '')}\n"
+        "Podíl vodních pixelů je odhad vodní plochy v polygonu, ne měření výšky hladiny "
+        "ani objemu vody. Zalednění WIC zatím aplikace nedokáže ověřit."
+    )
+    return {
+        "response": response,
+        "analysis": {**analysis, "algae": algae},
+        "selected_pond": pond,
+        "status": "completed",
+    }
+
+
+def _call_featherless_tools(
+    prompt: str,
+    state: dict[str, Any] | None = None,
+    normalized_municipality: str | None = None,
+) -> dict[str, Any]:
     config = get_featherless_config()
     api_key = config.get("FEATHERLESS_API_KEY")
     if not has_real_featherless() or OpenAI is None:
@@ -134,7 +250,23 @@ def _call_featherless_tools(prompt: str, state: dict[str, Any] | None = None) ->
         },
     ]
 
-    messages: list[dict[str, Any]] = [{"role": "system", "content": "Jsi asistent pro PondWatch AI. Rozumíš českým dotazům o rybnících, satelitních datech a vodní kvalitě. Proveď pouze lokální nástroje find_ponds a analyze_pond. Odpovídej česky."}, {"role": "user", "content": prompt}]
+    system_prompt = (
+        "Jsi asistent pro PondWatch AI. Rozumíš českým dotazům o rybnících, jejich "
+        "přezdívkám i skloňovaným názvům obcí. Před vyhledáním obce použij její základní "
+        "tvar. Proveď pouze lokální nástroje find_ponds a analyze_pond. Odpovídej česky. "
+        "Podíl vodních pixelů neprezentuj jako výšku hladiny nebo objem vody. Pokud WIC "
+        "data nejsou ve výsledku, netvrď, zda rybník zamrzl."
+    )
+    if normalized_municipality:
+        system_prompt += (
+            f" Předchozí normalizační krok určil základní tvar obce "
+            f"„{normalized_municipality}“. Přesně tento název použij jako municipality "
+            "v nástroji find_ponds."
+        )
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": prompt},
+    ]
     if state and state.get("chat_history"):
         for item in state["chat_history"]:
             role = "assistant" if item["role"] == "assistant" else "user"
@@ -150,8 +282,12 @@ def _call_featherless_tools(prompt: str, state: dict[str, Any] | None = None) ->
         for tool_call in tool_calls:
             func_name = tool_call.function.name
             arguments = json.loads(tool_call.function.arguments or "{}")
+            if func_name == "find_ponds" and normalized_municipality:
+                arguments["municipality"] = normalized_municipality
             tool_result = _dispatch_tool(func_name, arguments)
-            messages.append({"role": "assistant", "content": "", "tool_calls": [tool_call.model_dump()]})
+            call_message = tool_call.model_dump()
+            call_message["function"]["arguments"] = json.dumps(arguments, ensure_ascii=False)
+            messages.append({"role": "assistant", "content": "", "tool_calls": [call_message]})
             messages.append({"role": "tool", "tool_call_id": tool_call.id, "content": json.dumps(tool_result, ensure_ascii=False)})
 
         last_response = client.chat.completions.create(model=config.get("FEATHERLESS_MODEL", "Qwen/Qwen3-32B"), messages=messages)
@@ -165,15 +301,25 @@ def _call_featherless_tools(prompt: str, state: dict[str, Any] | None = None) ->
 def run_agent(prompt: str, state: dict[str, Any] | None = None) -> dict[str, Any]:
     if state is None:
         state = {}
-    if has_real_featherless():
+    raw_municipality = _extract_municipality(prompt)
+    municipality = raw_municipality or state.get("last_municipality")
+    normalized_municipality = None
+    is_pond_choice = bool(state.get("pending_candidates")) and re.fullmatch(r"\s*\d+\s*", prompt)
+    if raw_municipality and has_real_featherless() and not is_pond_choice:
+        normalized_municipality = _normalize_municipality_with_featherless(raw_municipality)
+        if normalized_municipality:
+            municipality = normalized_municipality
+
+    if has_real_featherless() and not is_pond_choice:
         try:
-            ai_result = _call_featherless_tools(prompt, state)
+            ai_result = _call_featherless_tools(
+                prompt, state, normalized_municipality
+            )
             if ai_result.get("analysis") is not None or ai_result.get("status"):
                 return ai_result
         except Exception:
             pass
 
-    municipality = _extract_municipality(prompt) or state.get("last_municipality")
     pond_name = _extract_pond_name(prompt) or state.get("last_pond_name")
     date_from, date_to = _extract_date_range(prompt)
     if date_from and date_to:
@@ -204,50 +350,61 @@ def run_agent(prompt: str, state: dict[str, Any] | None = None) -> dict[str, Any
                     ),
                     selected_candidate,
                 )
-                pond_id = selected["pond_id"]
                 state["selected_pond"] = selected
                 if not date_from or not date_to:
+                    state["pending_candidates"] = None
+                    state["pending_ponds"] = None
                     return {"response": "Vybral jsem rybník: " + selected["name"] + ". Uveďte prosím časové období, např. „od 2025-01-01 do 2025-12-31“.", "analysis": None, "selected_pond": selected, "status": "awaiting_input"}
-                analysis = analyze_pond(pond_id, date_from, date_to)
-                algae = analyze_algae_bloom(pond_id, date_from, date_to)
-                response = (
-                    f"Analýza pro {selected['name']} za období {date_from} až {date_to}:\n\n"
-                    f"{analysis.get('warning', '')}\n\n"
-                    f"Průměrný NDWI: {analysis.get('metrics', {}).get('average_ndwi')}\n"
-                    f"Průměrný NDTI: {analysis.get('metrics', {}).get('average_ndti')}\n"
-                    f"Průměrný NDCI: {_ndci_summary(algae)}\n\n"
-                    f"{algae.get('interpretation', '')}"
-                )
                 state["pending_candidates"] = None
                 state["pending_ponds"] = None
-                return {"response": response, "analysis": {**analysis, "algae": algae}, "selected_pond": selected, "status": "completed"}
+                return _analyze_selected_pond(selected, date_from, date_to)
+
+    explicit_municipality = _extract_municipality(prompt)
+    if (
+        state.get("selected_pond")
+        and date_from
+        and date_to
+        and explicit_municipality is None
+        and not state.get("pending_candidates")
+    ):
+        return _analyze_selected_pond(state["selected_pond"], date_from, date_to)
 
     pond_search = find_ponds(municipality, pond_name)
     if pond_search.get("status") == "multiple":
         state["pending_candidates"] = pond_search["candidates"]
         state["pending_ponds"] = pond_search.get("result", [])
-        choices = ", ".join(f"{item['number']}: {item['name']} ({item['area_m2']} m²)" for item in pond_search["candidates"])
-        return {"response": "Našel jsem více rybníků v obci. Vyberte prosím jeden z kandidátů: " + choices + ".", "analysis": None, "status": "awaiting_choice", "choices": pond_search["candidates"]}
+        choices = "; ".join(
+            _describe_candidate(item, index)
+            for index, item in enumerate(pond_search["candidates"])
+        )
+        return {
+            "response": (
+                f"Obec jsem převedl do základního tvaru „{pond_search.get('municipality', municipality)}“. "
+                "Našel jsem více rybníků. Vyberte prosím jednoho v mapě a seznamu níže: "
+                + choices
+                + "."
+            ),
+            "analysis": None,
+            "status": "awaiting_choice",
+            "choices": pond_search["candidates"],
+        }
 
-    if pond_search.get("status") == "not_found":
+    if pond_search.get("status") in ("not_found", "error"):
         return {"response": pond_search.get("message", "Rybník nebyl nalezen. Uveďte prosím upřesnění."), "analysis": None, "status": "not_found"}
 
     pond = pond_search["result"][0]
     state["selected_pond"] = pond
     if not date_from or not date_to:
-        return {"response": f"Nalezen rybník: {pond['name']}. Uveďte prosím časové období, například „od 2025-01-01 do 2025-12-31“.", "analysis": None, "selected_pond": pond, "status": "awaiting_input"}
+        canonical_name = pond_search.get("municipality", municipality)
+        return {
+            "response": (
+                f"Obec jsem převedl do základního tvaru „{canonical_name}“. "
+                f"Nalezen rybník: {pond['name']}. Uveďte prosím časové období, "
+                "například „od 2025-01-01 do 2025-12-31“."
+            ),
+            "analysis": None,
+            "selected_pond": pond,
+            "status": "awaiting_input",
+        }
 
-    analysis = analyze_pond(pond["pond_id"], date_from, date_to)
-    algae = analyze_algae_bloom(pond["pond_id"], date_from, date_to)
-    data_text = analysis.get("warning", "")
-    metrics = analysis.get("metrics", {})
-    response = (
-        f"Vyhodnocení rybníka {pond['name']} ({pond['area_m2']} m²) pro období {date_from} až {date_to}.\n"
-        f"{data_text}\n"
-        f"Průměrný NDWI: {metrics.get('average_ndwi', 'n/a')}\n"
-        f"Průměrný NDTI: {metrics.get('average_ndti', 'n/a')}\n"
-        f"Průměrný NDCI: {_ndci_summary(algae)}\n"
-        f"{algae.get('interpretation', '')}\n"
-        f"Kvalita dat: {analysis.get('quality_summary', {}).get('data_quality', 'neznámá')}"
-    )
-    return {"response": response, "analysis": {**analysis, "algae": algae}, "selected_pond": pond, "status": "completed"}
+    return _analyze_selected_pond(pond, date_from, date_to)

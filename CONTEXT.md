@@ -22,9 +22,24 @@ Záznam významných změn a důvodů jejich provedení. Při dalších úpravá
 
 - Rozšířeno rozpoznávání obce na české předložky `v` i `ve`, doplněny běžné aliasy včetně „Valmez“ a inflektovaného „Valašském Meziříčí“. Důvod: původní parser hledal pouze `v ` a požadavek z konverzace proto nepoznal.
 - Zastavuje se zachycení názvu obce před navazující částí věty, například „a řekni…“.
-- „Poslední měsíc“ se interpretuje jako klouzavých 30 dní do dnešního data. Pokud je rybníků víc, systém si vyžádá výběr jednoho.
+- Relativní období „poslední měsíc“ se převádí na rozsah od stejného dne předchozího měsíce do dneška. Pokud je rybníků víc, systém si vyžádá výběr jednoho.
 - Přidán Streamlit spinner „Přemýšlím a připravuji analýzu…“, aby uživatel viděl, že se dotaz zpracovává.
 - Pokud je nastaven Copernicus, UI už nepředvyplňuje simulované grafy ani demo rybník. Tím se brání záměně simulovaných hodnot za živá měření.
+
+## 2026-11-13 — výběr rybníka na mapě
+
+- Bezejmenné rybníky se v chatu i seznamu popisují plochou v m² a ha a přibližnými souřadnicemi; souřadnice jsou odvozeny z polygonu a označeny jako přibližné.
+- Při více kandidátech se zobrazí mapa polygonů a značek s popisky a dropdown s odpovídajícími popisy. Tlačítko umožní vybrat rybník a navázat analýzou bez psaní pořadového čísla do chatu.
+- Relativní intervaly podporují počty měsíců, např. „poslední 3 měsíce“. Kontrola testovacího dotazu určila pro dnešní datum interval 2026-08-13 až 2026-11-13.
+- Odpověď výslovně rozlišuje podíl vodní plochy od výšky hladiny a objemu vody; tyto veličiny aplikace přímo neměří.
+- Živý test pro Valmez našel čtyři rybníky s polygonem. Ověřen také výběr kandidáta a pokračování analýzou pomocí testovacích návratových dat.
+
+## 2026-11-13 — modelová normalizace obcí
+
+- Před tool-calling krokem Featherless dostane samostatný požadavek na převod vytaženého názvu obce do úředního základního tvaru RÚIAN. Odpověď je strukturovaná jako JSON; například „Řitce“ se převádí na „Řitka“.
+- Normalizovaný název se vynutí v argumentech `find_ponds` i v místní záložní cestě, aby model nemohl omylem vyhledávat pouze skloňovaný tvar.
+- Při selhání normalizačního API se použije místní parser a zaznamená se pouze typ chyby, nikdy klíč nebo token. Odpověď v chatu zobrazí rozpoznaný základní tvar obce.
+- Ověřeno na živém hledání: „rybník v Řitce“ → „Řitka“ → dva rybníky v RÚIAN/ZABAGED.
 
 ## Ověření a spuštění
 

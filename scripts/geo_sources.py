@@ -48,6 +48,24 @@ def _normalise_geometry(geometry: dict[str, Any] | None) -> dict[str, Any] | Non
     return geometry
 
 
+def _approximate_location(geometry: dict[str, Any] | None) -> dict[str, float] | None:
+    if not geometry:
+        return None
+    coordinates = geometry.get("coordinates") or []
+    if not coordinates or not isinstance(coordinates[0], list):
+        return None
+    ring = coordinates[0]
+    points = [point for point in ring if isinstance(point, (list, tuple)) and len(point) >= 2]
+    if len(points) > 1 and points[0] == points[-1]:
+        points.pop()
+    if not points:
+        return None
+    return {
+        "longitude": sum(float(point[0]) for point in points) / len(points),
+        "latitude": sum(float(point[1]) for point in points) / len(points),
+    }
+
+
 def _normalise_pond_result(feature: dict[str, Any]) -> dict[str, Any]:
     attrs = feature.get("attributes") or {}
     area = attrs.get("Shape_Area")
@@ -73,11 +91,13 @@ def _normalise_pond_result(feature: dict[str, Any]) -> dict[str, Any]:
         or attrs.get("fid")
         or ""
     )
+    geometry = _normalise_geometry(feature.get("geometry"))
     return {
         "pond_id": str(pond_id),
         "name": str(name) if name else "Bezejmenný rybník",
         "area_m2": int(round(area_val)),
-        "geometry": _normalise_geometry(feature.get("geometry")),
+        "geometry": geometry,
+        "approx_location": _approximate_location(geometry),
         "attributes": attrs,
     }
 
@@ -172,7 +192,15 @@ def find_ponds(municipality: str, pond_name: str | None = None) -> dict[str, Any
                 "status": "ok",
                 "municipality": municipality,
                 "result": [result],
-                "candidates": [{"number": 1, "pond_id": result["pond_id"], "name": result["name"], "area_m2": result["area_m2"]}],
+                "candidates": [
+                    {
+                        "number": 1,
+                        "pond_id": result["pond_id"],
+                        "name": result["name"],
+                        "area_m2": result["area_m2"],
+                        "approx_location": result["approx_location"],
+                    }
+                ],
             }
 
         candidates = [
@@ -181,6 +209,7 @@ def find_ponds(municipality: str, pond_name: str | None = None) -> dict[str, Any
                 "pond_id": item["pond_id"],
                 "name": item["name"],
                 "area_m2": item["area_m2"],
+                "approx_location": item["approx_location"],
             }
             for index, item in enumerate(cleaned)
         ]
