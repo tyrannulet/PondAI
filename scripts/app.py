@@ -1,15 +1,81 @@
 from __future__ import annotations
 
-from typing import Any
+import math
+from contextlib import contextmanager
+from html import escape
+from typing import Any, Iterator
 
 import pandas as pd
-import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 from streamlit_folium import st_folium
 
 from scripts import demo_data
-from scripts.agent import _fallback_chart_interpretation, run_agent
+from scripts.agent import _fallback_chart_interpretation, _requests_charts, run_agent
 from scripts.config import APP_SUBTITLE, APP_TITLE, get_api_status, has_real_copernicus, has_real_featherless
+
+# ---------------------------------------------------------------------------
+# Color palette
+# ---------------------------------------------------------------------------
+PALETTE = {
+    "water":  {"line": "#3B82F6", "fill": "rgba(59,130,246,0.13)",  "accent": "#2563EB"},
+    "ndwi":   {"line": "#06B6D4", "fill": "rgba(6,182,212,0.13)",   "accent": "#0891B2"},
+    "ndti":   {"line": "#F59E0B", "fill": "rgba(245,158,11,0.13)",  "accent": "#D97706"},
+    "ndci":   {"line": "#10B981", "fill": "rgba(16,185,129,0.13)",  "accent": "#059669"},
+    "ice":    {"line": "#8B5CF6", "fill": "rgba(139,92,246,0.13)",  "accent": "#7C3AED"},
+}
+
+THINKING_ICONS = (
+    "🎣", "🐟", "🚣", "🏊", "🛶", "🏄", "⛵", "🏖️", "💧",
+)
+
+
+@contextmanager
+def _pond_thinking(message: str) -> Iterator[None]:
+    """Cycle pond motifs in the browser while the agent runs synchronously."""
+    placeholder = st.empty()
+    duration = len(THINKING_ICONS) * 1.2
+    visible_percent = 100 / len(THINKING_ICONS)
+    icons = "".join(
+        f'<span style="animation-delay: {index * 1.2:.1f}s">{icon}</span>'
+        for index, icon in enumerate(THINKING_ICONS)
+    )
+    placeholder.markdown(
+        f"""
+        <style>
+        .pond-thinking {{
+            display: flex; align-items: center; gap: .75rem;
+            padding: .75rem 0;
+        }}
+        .pond-thinking-icons {{
+            display: inline-grid; flex: 0 0 2.75rem;
+            width: 2.75rem; height: 2.75rem;
+            place-items: center; font-size: 2rem; line-height: 1;
+        }}
+        .pond-thinking-icons span {{
+            grid-area: 1 / 1; opacity: 0;
+            animation: pond-icon-cycle {duration:.1f}s linear infinite;
+        }}
+        @keyframes pond-icon-cycle {{
+            0%, {visible_percent - .01:.2f}% {{ opacity: 1; }}
+            {visible_percent:.2f}%, 100% {{ opacity: 0; }}
+        }}
+        @media (prefers-reduced-motion: reduce) {{
+            .pond-thinking-icons span {{ animation: none; }}
+            .pond-thinking-icons span:first-child {{ opacity: 1; }}
+        }}
+        </style>
+        <div class="pond-thinking" role="status">
+            <span class="pond-thinking-icons" aria-hidden="true">{icons}</span>
+            <span>{escape(message)}</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    try:
+        yield
+    finally:
+        placeholder.empty()
 
 
 def _default_analysis() -> dict[str, Any]:
@@ -18,12 +84,13 @@ def _default_analysis() -> dict[str, Any]:
 
 def _ensure_session() -> None:
     st.session_state.setdefault("messages", [])
+    st.session_state.setdefault("show_charts", False)
     st.session_state.setdefault("analysis", None if has_real_copernicus() else _default_analysis())
     st.session_state.setdefault(
         "selected_pond",
         None
         if has_real_copernicus()
-        else {"pond_id": "ritka-pond-1", "name": "Rybník v Řitce", "municipality": "Řítek", "area_m2": 142500},
+        else {"pond_id": "ritka-pond-1", "name": "Demo pond in Řitka", "water_body_type": "pond", "municipality": "Řitka", "area_m2": 142500},
     )
     st.session_state.setdefault("pending_candidates", None)
     if has_real_copernicus() and (st.session_state.get("analysis") or {}).get("demo_mode"):
@@ -33,15 +100,15 @@ def _ensure_session() -> None:
 
 def _render_map(geometry: dict[str, Any] | None, pond_name: str) -> None:
     if not geometry:
-        st.info("Pro tento rybník není k dispozici polygon pro zobrazení na mapě.")
+        st.info("No polygon is available to display on the map.")
         return
     coords = geometry.get("coordinates", [])
     if not coords:
-        st.info("Polygon zatím není k dispozici.")
+        st.info("The polygon is not available yet.")
         return
     shape = coords[0] if isinstance(coords[0], list) and coords[0] and isinstance(coords[0][0], list) else coords
     if not shape:
-        st.info("Polygon je prázdný.")
+        st.info("The polygon is empty.")
         return
 
     import folium
@@ -49,19 +116,20 @@ def _render_map(geometry: dict[str, Any] | None, pond_name: str) -> None:
     m = folium.Map(location=[shape[0][1], shape[0][0]], zoom_start=14, tiles="OpenStreetMap")
     folium.Polygon(locations=[[point[1], point[0]] for point in shape], color="green", fill=True, fill_opacity=0.4, tooltip=pond_name).add_to(m)
     st_folium(m, width=700, height=420)
-    st.caption(f"Mapa: {pond_name}")
+    st.caption(f"Map: {pond_name}")
 
 
 def _pond_option_label(pond: dict[str, Any], index: int) -> str:
-    name = pond.get("name") or "Bezejmenný rybník"
+    name = pond.get("name") or "Unnamed water body"
     area = int(pond.get("area_m2") or 0)
     area_text = f"{area:,}".replace(",", " ")
-    hectares = f"{area / 10_000:.2f}".replace(".", ",")
+    hectares = f"{area / 10_000:.2f}"
     location = pond.get("approx_location") or {}
     location_text = ""
     if location.get("latitude") is not None and location.get("longitude") is not None:
-        location_text = f" · přibližně {location['latitude']:.4f}° N, {location['longitude']:.4f}° E"
-    return f"{index + 1}. {name} · {area_text} m² ({hectares} ha){location_text}"
+        location_text = f" · approx. {location['latitude']:.4f}° N, {location['longitude']:.4f}° E"
+    water_type = pond.get("water_body_type", "water body")
+    return f"{index + 1}. {name} · {water_type} · {area_text} m² ({hectares} ha){location_text}"
 
 
 def _render_candidate_map(ponds: list[dict[str, Any]]) -> None:
@@ -83,7 +151,7 @@ def _render_candidate_map(ponds: list[dict[str, Any]]) -> None:
         candidates.append((index, pond, points, (float(latitude), float(longitude))))
 
     if not candidates:
-        st.info("Pro kandidáty nejsou dostupné polygony k zobrazení na mapě.")
+        st.info("No candidate polygons are available to display on the map.")
         return
 
     center = (
@@ -106,7 +174,7 @@ def _render_candidate_map(ponds: list[dict[str, Any]]) -> None:
         ).add_to(map_obj)
         folium.Marker(
             location=location,
-            tooltip=f"Kandidát {index + 1}",
+            tooltip=f"Candidate {index + 1}",
             popup=label,
             icon=folium.Icon(color=color, icon="info-sign"),
         ).add_to(map_obj)
@@ -125,27 +193,27 @@ def _render_pond_picker() -> None:
     if not ponds or not options:
         return
 
-    st.subheader("Vyberte rybník")
-    st.caption("Polygony a značky na mapě odpovídají kandidátům v seznamu. Najetím nebo kliknutím zobrazíte jejich popisek.")
+    st.subheader("Choose a water body")
+    st.caption("Polygons and markers on the map match the candidates in the list. Hover or click to see details.")
     _render_candidate_map(ponds)
     selected_index = st.selectbox(
-        "Rybník podle plochy a přibližné polohy",
+        "Water body by area and approximate location",
         options=range(len(ponds)),
         format_func=lambda index: _pond_option_label(ponds[index], index),
         key="pond_candidate_selection",
     )
-    if st.button("Vybrat rybník a pokračovat", key="select_pond_candidate"):
+    if st.button("Select water body and continue", key="select_pond_candidate"):
         pond = ponds[selected_index]
         candidate = next(
             (item for item in options if item.get("pond_id") == pond.get("pond_id")),
             options[selected_index],
         )
-        with st.spinner("Připravuji analýzu vybraného rybníka…"):
+        with _pond_thinking("Preparing the selected water-body analysis…"):
             result = run_agent(str(candidate["number"]), st.session_state)
         st.session_state["analysis"] = result.get("analysis")
         st.session_state["selected_pond"] = result.get("selected_pond") or pond
         st.session_state["messages"].append(
-            {"role": "user", "content": f"Vybral/a jsem: {_pond_option_label(pond, selected_index)}"}
+            {"role": "user", "content": f"Selected: {_pond_option_label(pond, selected_index)}"}
         )
         st.session_state["messages"].append(
             {"role": "assistant", "content": result["response"]}
@@ -153,24 +221,429 @@ def _render_pond_picker() -> None:
         st.rerun()
 
 
-def _render_line_chart(df: pd.DataFrame, metric: str, title: str, color: str) -> None:
-    fig = px.line(df, x="date", y=metric, markers=True, title=title, color_discrete_sequence=[color])
-    fig.update_layout(xaxis_title="Datum", yaxis_title=metric)
-    st.plotly_chart(fig, use_container_width=True)
+# ---------------------------------------------------------------------------
+# CSS injection for card-based analytics widget
+# ---------------------------------------------------------------------------
+_CARD_CSS = """
+<style>
+.analytics-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 1rem;
+    margin: 1rem 0 1.5rem;
+}
+.analytics-card {
+    background: var(--ag-card-bg, #ffffff);
+    border-radius: 16px;
+    padding: 1.1rem 1.2rem 1rem;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+    border: 1px solid rgba(0,0,0,0.06);
+    transition: box-shadow 0.2s ease, transform 0.15s ease;
+}
+.analytics-card:hover {
+    box-shadow: 0 4px 14px rgba(0,0,0,0.10);
+    transform: translateY(-1px);
+}
+.card-header {
+    display: flex;
+    align-items: center;
+    gap: 0.45rem;
+    margin-bottom: 0.3rem;
+}
+.card-icon {
+    font-size: 1.15rem;
+    line-height: 1;
+}
+.card-title {
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--ag-card-title, #475569);
+    letter-spacing: 0.01em;
+}
+.stat-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    padding: 0.15rem 0;
+}
+.stat-label {
+    font-size: 0.7rem;
+    color: var(--ag-stat-label, #94a3b8);
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    font-weight: 500;
+}
+.stat-value {
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--ag-stat-value, #1e293b);
+}
+.trend-up { color: #10b981; }
+.trend-down { color: #ef4444; }
+.trend-flat { color: #94a3b8; }
+/* dark-mode overrides (Streamlit dark theme) */
+@media (prefers-color-scheme: dark) {
+    .analytics-card {
+        --ag-card-bg: #1e1e2e;
+        --ag-card-title: #cbd5e1;
+        --ag-stat-label: #64748b;
+        --ag-stat-value: #e2e8f0;
+        border-color: rgba(255,255,255,0.07);
+    }
+}
+[data-testid="stAppViewContainer"][data-theme="dark"] .analytics-card,
+.stApp[data-theme="dark"] .analytics-card {
+    --ag-card-bg: #1e1e2e;
+    --ag-card-title: #cbd5e1;
+    --ag-stat-label: #64748b;
+    --ag-stat-value: #e2e8f0;
+    border-color: rgba(255,255,255,0.07);
+}
+</style>
+"""
 
 
-def _render_algae_panel(analysis: dict[str, Any]) -> None:
-    algae = analysis.get("algae", {})
-    st.subheader("Biologická kvalita vody")
-    if algae:
-        chart_df = pd.DataFrame(algae.get("ndci_trend", []))
-        if not chart_df.empty:
-            _render_line_chart(chart_df, "ndci", "Vývoj NDCI", "#2E8B57")
-        st.info(algae.get("interpretation", ""))
-        st.write(f"Kategorie: {algae.get('category', 'neznámá')}")
-        st.write(f"Kvalita měření: {algae.get('quality', {}).get('data_quality', 'neznámá')}")
-    else:
-        st.info("Nebyly k dispozici experimentální údaje o biologické kvalitě vody.")
+# ---------------------------------------------------------------------------
+# Sparkline & detail-chart helpers
+# ---------------------------------------------------------------------------
+
+def _safe_values(series: list[dict[str, Any]], metric: str) -> tuple[list[str], list[float]]:
+    """Extract (dates, values) pairs, skipping None entries."""
+    dates: list[str] = []
+    vals: list[float] = []
+    for item in series:
+        v = item.get(metric)
+        if v is None or (isinstance(v, float) and not math.isfinite(v)):
+            continue
+        dates.append(str(item.get("date", "")))
+        vals.append(float(v))
+    return dates, vals
+
+
+def _trend_arrow(values: list[float]) -> tuple[str, str]:
+    """Return (arrow, css_class) for the first→last change."""
+    if len(values) < 2:
+        return "—", "trend-flat"
+    delta = values[-1] - values[0]
+    if abs(delta) < 1e-9:
+        return "→", "trend-flat"
+    if delta > 0:
+        return "↗", "trend-up"
+    return "↘", "trend-down"
+
+
+def _sparkline_figure(
+    dates: list[str],
+    values: list[float],
+    color_key: str,
+) -> go.Figure:
+    """Build a minimal sparkline (no axes, no toolbar)."""
+    pal = PALETTE.get(color_key, PALETTE["water"])
+    fig = go.Figure(
+        go.Scatter(
+            x=dates,
+            y=values,
+            mode="lines",
+            line=dict(color=pal["line"], width=2.5, shape="spline", smoothing=1.3),
+            fill="tozeroy",
+            fillcolor=pal["fill"],
+            hoverinfo="skip",
+        )
+    )
+    fig.update_layout(
+        margin=dict(l=0, r=0, t=0, b=0),
+        height=80,
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        xaxis=dict(visible=False, showgrid=False, zeroline=False),
+        yaxis=dict(visible=False, showgrid=False, zeroline=False),
+        showlegend=False,
+        dragmode=False,
+    )
+    return fig
+
+
+def _detail_chart(
+    dates: list[str],
+    values: list[float],
+    color_key: str,
+    y_label: str,
+    reference_line: float | None = None,
+    bands: list[tuple[float, float, str, str]] | None = None,
+) -> go.Figure:
+    """Full interactive chart for the expanded view."""
+    pal = PALETTE.get(color_key, PALETTE["water"])
+    fig = go.Figure()
+
+    # Interpretation / reference bands
+    if bands:
+        for y0, y1, band_color, label in bands:
+            fig.add_hrect(
+                y0=y0, y1=y1,
+                fillcolor=band_color,
+                layer="below",
+                line_width=0,
+                annotation_text=label,
+                annotation_position="top left",
+                annotation_font_size=10,
+                annotation_font_color="#94a3b8",
+            )
+
+    fig.add_trace(
+        go.Scatter(
+            x=dates,
+            y=values,
+            mode="lines+markers",
+            line=dict(color=pal["line"], width=2.5, shape="spline", smoothing=1.3),
+            marker=dict(size=7, color=pal["line"], line=dict(width=1.5, color="white")),
+            fill="tozeroy",
+            fillcolor=pal["fill"],
+            hovertemplate="%{x|%d %b %Y}<br><b>%{y:.3f}</b><extra></extra>",
+        )
+    )
+
+    if reference_line is not None:
+        fig.add_hline(
+            y=reference_line,
+            line_dash="dot",
+            line_color="#94a3b8",
+            line_width=1,
+            annotation_text="threshold",
+            annotation_position="bottom right",
+            annotation_font_size=10,
+            annotation_font_color="#94a3b8",
+        )
+
+    # Min / max annotations
+    if values:
+        min_idx = values.index(min(values))
+        max_idx = values.index(max(values))
+        fig.add_annotation(
+            x=dates[min_idx], y=values[min_idx],
+            text=f"Min {values[min_idx]:.3g}",
+            showarrow=True, arrowhead=0, arrowcolor="#94a3b8",
+            font=dict(size=10, color="#64748b"),
+            bgcolor="white", bordercolor="#e2e8f0", borderwidth=1, borderpad=3,
+            ay=30,
+        )
+        if max_idx != min_idx:
+            fig.add_annotation(
+                x=dates[max_idx], y=values[max_idx],
+                text=f"Max {values[max_idx]:.3g}",
+                showarrow=True, arrowhead=0, arrowcolor="#94a3b8",
+                font=dict(size=10, color="#64748b"),
+                bgcolor="white", bordercolor="#e2e8f0", borderwidth=1, borderpad=3,
+                ay=-30,
+            )
+
+    fig.update_layout(
+        height=370,
+        margin=dict(l=45, r=20, t=25, b=45),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        xaxis=dict(
+            showgrid=True, gridcolor="rgba(0,0,0,0.04)", gridwidth=1,
+            title=None,
+            rangeslider=dict(visible=True, thickness=0.06),
+        ),
+        yaxis=dict(
+            showgrid=True, gridcolor="rgba(0,0,0,0.04)", gridwidth=1,
+            title=dict(text=y_label, font=dict(size=11, color="#94a3b8")),
+        ),
+        font=dict(family="Inter, system-ui, -apple-system, sans-serif"),
+        showlegend=False,
+        hovermode="x unified",
+    )
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Card-based analytics widget
+# ---------------------------------------------------------------------------
+
+def _fmt(value: float | None, suffix: str = "", precision: int = 3) -> str:
+    if value is None:
+        return "—"
+    if precision == 0:
+        return f"{value:.0f}{suffix}"
+    return f"{value:.{precision}g}{suffix}"
+
+
+def _render_analytics_widget(analysis: dict[str, Any]) -> None:
+    """Render the 4–5 metric preview cards + click-to-expand detail charts."""
+
+    st.markdown(_CARD_CSS, unsafe_allow_html=True)
+
+    timeseries = analysis.get("timeseries") or []
+    algae = analysis.get("algae") or {}
+    algae_series = algae.get("ndci_trend") or timeseries
+
+    if not timeseries:
+        st.info("No observations are available. Submit a new request to run another analysis.")
+        return
+
+    # ── Gather data for each card ──────────────────────────────────────
+    cards_config: list[dict[str, Any]] = []
+
+    # 1) Water %
+    w_dates, w_vals = _safe_values(timeseries, "water_percent")
+    if w_vals:
+        avg_w = sum(w_vals) / len(w_vals)
+        arrow, css = _trend_arrow(w_vals)
+        delta = w_vals[-1] - w_vals[0]
+        cards_config.append({
+            "key": "water", "icon": "💧", "title": "Water coverage",
+            "dates": w_dates, "values": w_vals,
+            "stats": [
+                ("Average", _fmt(avg_w, " %", 1)),
+                ("Δ Trend", f'<span class="{css}">{arrow} {delta:+.1f} %</span>'),
+                ("Range", f"{min(w_vals):.0f} – {max(w_vals):.0f} %"),
+            ],
+            "y_label": "Water %",
+            "detail_extra": {},
+        })
+
+    # 2) NDWI
+    n_dates, n_vals = _safe_values(timeseries, "ndwi")
+    if n_vals:
+        avg_n = sum(n_vals) / len(n_vals)
+        arrow, css = _trend_arrow(n_vals)
+        delta = n_vals[-1] - n_vals[0]
+        cards_config.append({
+            "key": "ndwi", "icon": "🌊", "title": "NDWI",
+            "dates": n_dates, "values": n_vals,
+            "stats": [
+                ("Average", _fmt(avg_n)),
+                ("Δ Trend", f'<span class="{css}">{arrow} {delta:+.3f}</span>'),
+                ("Range", f"{min(n_vals):.3f} – {max(n_vals):.3f}"),
+            ],
+            "y_label": "NDWI",
+            "detail_extra": {"reference_line": 0.0},
+        })
+
+    # 3) NDTI
+    t_dates, t_vals = _safe_values(timeseries, "ndti")
+    if t_vals:
+        avg_t = sum(t_vals) / len(t_vals)
+        arrow, css = _trend_arrow(t_vals)
+        delta = t_vals[-1] - t_vals[0]
+        cards_config.append({
+            "key": "ndti", "icon": "🟠", "title": "NDTI",
+            "dates": t_dates, "values": t_vals,
+            "stats": [
+                ("Average", _fmt(avg_t)),
+                ("Δ Trend", f'<span class="{css}">{arrow} {delta:+.3f}</span>'),
+                ("Range", f"{min(t_vals):.3f} – {max(t_vals):.3f}"),
+            ],
+            "y_label": "NDTI",
+            "detail_extra": {
+                "bands": [
+                    (-1, 0.1, "rgba(16,185,129,0.06)", "Low"),
+                    (0.1, 0.25, "rgba(245,158,11,0.06)", "Moderate"),
+                    (0.25, 1, "rgba(239,68,68,0.06)", "High"),
+                ],
+            },
+        })
+
+    # 4) NDCI
+    c_dates, c_vals = _safe_values(algae_series, "ndci")
+    if c_vals:
+        avg_c = sum(c_vals) / len(c_vals)
+        arrow, css = _trend_arrow(c_vals)
+        cat = algae.get("category", "—")
+        cards_config.append({
+            "key": "ndci", "icon": "🌿", "title": "NDCI",
+            "dates": c_dates, "values": c_vals,
+            "stats": [
+                ("Average", _fmt(avg_c)),
+                ("Screening", cat),
+                ("Trend", f'<span class="{css}">{arrow}</span>'),
+            ],
+            "y_label": "NDCI",
+            "detail_extra": {
+                "bands": [
+                    (-1, 0.18, "rgba(16,185,129,0.06)", "Normal"),
+                    (0.18, 0.24, "rgba(245,158,11,0.06)", "Elevated"),
+                    (0.24, 1, "rgba(239,68,68,0.06)", "Bloom risk"),
+                ],
+            },
+        })
+
+    # 5) Ice (if present)
+    i_dates, i_vals = _safe_values(timeseries, "ice_percent")
+    if i_vals and any(v > 0 for v in i_vals):
+        avg_i = sum(i_vals) / len(i_vals)
+        ice_info = analysis.get("ice") or {}
+        ice_status = ice_info.get("status", "—")
+        cards_config.append({
+            "key": "ice", "icon": "❄️", "title": "Ice screening",
+            "dates": i_dates, "values": i_vals,
+            "stats": [
+                ("Average", _fmt(avg_i, " %", 1)),
+                ("Status", ice_status.replace("_", " ").title()),
+                ("Range", f"{min(i_vals):.1f} – {max(i_vals):.1f} %"),
+            ],
+            "y_label": "Ice %",
+            "detail_extra": {"reference_line": 15.0},
+        })
+
+    if not cards_config:
+        st.info("No valid metric data found in the satellite observations.")
+        return
+
+    # ── Render preview cards (HTML grid with sparklines) ───────────────
+
+    st.markdown("#### 📊 Analytics overview")
+
+    cols = st.columns(len(cards_config))
+    for idx, card in enumerate(cards_config):
+        with cols[idx]:
+            # Card header + stats as HTML
+            stats_html = "".join(
+                f'<div class="stat-row"><span class="stat-label">{label}</span>'
+                f'<span class="stat-value">{value}</span></div>'
+                for label, value in card["stats"]
+            )
+            st.markdown(
+                f'<div class="analytics-card">'
+                f'<div class="card-header">'
+                f'<span class="card-icon">{card["icon"]}</span>'
+                f'<span class="card-title">{card["title"]}</span>'
+                f'</div>'
+                f'</div>',
+                unsafe_allow_html=True,
+            )
+            # Sparkline (Plotly, no config toolbar)
+            spark = _sparkline_figure(card["dates"], card["values"], card["key"])
+            st.plotly_chart(spark, use_container_width=True, config={"displayModeBar": False})
+            # Stats
+            st.markdown(
+                f'<div>{stats_html}</div>',
+                unsafe_allow_html=True,
+            )
+
+    # ── Expandable detail charts ──────────────────────────────────────
+    st.markdown("---")
+    for card in cards_config:
+        with st.expander(f"{card['icon']}  {card['title']} — detailed chart", expanded=False):
+            detail = _detail_chart(
+                card["dates"],
+                card["values"],
+                card["key"],
+                card["y_label"],
+                **card["detail_extra"],
+            )
+            st.plotly_chart(detail, use_container_width=True)
+            # Extra context per metric
+            if card["key"] == "ndci":
+                interp = algae.get("interpretation")
+                if interp:
+                    st.caption(interp)
+            if card["key"] == "ice":
+                ice_info = analysis.get("ice") or {}
+                lim = ice_info.get("limitations")
+                if lim:
+                    st.caption(lim)
 
 
 st.set_page_config(page_title=APP_TITLE, page_icon="🌊", layout="wide")
@@ -184,30 +657,32 @@ def main() -> None:
 
     api_status = get_api_status()
     if not has_real_copernicus():
-        st.warning("DEMO REŽIM – zobrazená data jsou simulovaná, nejde o skutečnou satelitní analýzu.")
+        st.warning("DEMO MODE — these are simulated values, not a real satellite analysis.")
     elif not has_real_featherless():
-        st.info("Satelitní data lze načíst, ale Featherless AI není nastaven. Pokračovat můžete běžným českým promptem.")
+        st.info("Satellite data are available, but Featherless AI is not configured. You can continue with an English or Czech request.")
     else:
-        st.success("Aplikace má aktivní připojení k API. Přesné satelitní údaje budou načteny podle konfigurace.")
+        st.success("API connections are active. Satellite observations will be loaded for your selected dates.")
 
     with st.sidebar:
-        st.header("Stav API")
+        st.header("API status")
         st.write("Featherless:", api_status["featherless"]["ready"])
         st.write("Copernicus:", api_status["copernicus"]["ready"])
         if not has_real_copernicus():
-            st.info("Přidejte API klíče do souborů api/featherless.txt a api/copernicus.txt a restartujte aplikaci.")
+            st.info("Add API credentials to api/featherless.txt and api/copernicus.txt, then restart the app.")
 
     if "messages" in st.session_state and st.session_state["messages"]:
         for message in st.session_state["messages"]:
             with st.chat_message(message["role"]):
                 st.markdown(message["content"])
 
-    if prompt := st.chat_input("Zadejte požadavek, například: Analyzuj rybník v Řitce za celý rok 2025."):
+    if prompt := st.chat_input("Ask in English or Czech, e.g. 'Analyze ponds in Řitka for 2025.'"):
         st.session_state["messages"].append({"role": "user", "content": prompt})
         with st.chat_message("user"):
             st.markdown(prompt)
 
-        with st.spinner("Přemýšlím a připravuji analýzu…"):
+        if _requests_charts(prompt):
+            st.session_state["show_charts"] = True
+        with _pond_thinking("Understanding your request and preparing the analysis…"):
             result = run_agent(prompt, st.session_state)
         if result.get("status") == "awaiting_choice":
             st.session_state["analysis"] = None
@@ -225,56 +700,58 @@ def main() -> None:
     analysis = st.session_state.get("analysis")
     selected_pond = st.session_state.get("selected_pond")
     if not analysis or not selected_pond:
-        st.info("Zadejte požadavek do chatu výše. Skutečné výsledky se zobrazí po výběru rybníka a dokončení satelitní analýzy.")
+        st.info("Enter a request in the chat above. Results appear after selecting a water body and completing the satellite analysis.")
         return
 
-    st.subheader(f"Vybraný rybník: {selected_pond.get('name', 'Neznámý rybník')}")
+    st.subheader(f"Selected water body: {selected_pond.get('name', 'Unknown water body')}")
     col_map, col_meta = st.columns([2, 1])
     with col_map:
         _render_map(
             analysis.get("geometry")
             or selected_pond.get("geometry")
             or demo_data.DEMO_PONDS.get(selected_pond.get("pond_id"), {}).get("geometry"),
-            selected_pond.get("name", "Rybník"),
+            selected_pond.get("name", "Water body"),
         )
     with col_meta:
-        st.write(f"ID: {selected_pond.get('pond_id', 'neznámé')}")
-        st.write(f"Obec: {selected_pond.get('municipality', 'neznámá')}")
-        st.write(f"Plocha: {selected_pond.get('area_m2', 'neznámá')} m²")
-        st.write(f"Kvalita dat: {analysis.get('quality_summary', {}).get('data_quality', 'neznámá')}")
-        st.write(f"Spolehlivost: {analysis.get('quality_summary', {}).get('reliability', 'neznámá')}")
+        st.write(f"ID: {selected_pond.get('pond_id', 'unknown')}")
+        st.write(f"Type: {selected_pond.get('water_body_type', 'water body')}")
+        st.write(f"Municipality: {selected_pond.get('municipality', 'unknown')}")
+        st.write(f"Area: {selected_pond.get('area_m2', 'unknown')} m²")
+        st.write(f"Data quality: {analysis.get('quality_summary', {}).get('data_quality', 'unknown')}")
+        st.write(f"Reliability: {analysis.get('quality_summary', {}).get('reliability', 'unknown')}")
+
+    st.subheader("Plain-language report")
+    st.markdown(analysis.get("report", "The report is not available for this analysis."))
 
     series = analysis.get("timeseries") or []
     if series:
-        df = pd.DataFrame(series)
-        st.subheader("Vodní plocha")
-        _render_line_chart(df, "water_percent", "Podíl vodní plochy (%)", "#1f77b4")
-        st.subheader("Optické indikátory vody")
-        _render_line_chart(df, "ndwi", "Vývoj NDWI", "#17becf")
-        _render_line_chart(df, "ndti", "Vývoj NDTI", "#ff7f0e")
-        st.subheader("Zalednění")
-        st.info("Analýza zalednění WIC zatím není implementována; aplikace nemůže ověřit, zda byl rybník zamrzlý.")
-        _render_algae_panel(analysis)
-        st.subheader("Interpretace grafů")
-        st.markdown(
-            analysis.get(
-                "graph_interpretation",
-                _fallback_chart_interpretation(
-                    analysis, analysis.get("algae", {})
-                ),
-            )
-        )
-        st.subheader("Tabulka naměřených hodnot")
-        st.dataframe(df[["date", "ndwi", "ndti", "water_percent", "valid_pixels"]], use_container_width=True)
-    else:
-        st.info("Žádná data k zobrazení. Zadejte nový požadavek pro spuštění analýzy.")
+        _render_analytics_widget(analysis)
 
-    st.subheader("Kvalita a spolehlivost měření")
+        if st.checkbox("Show measurements table", key="show_table", value=False):
+            df = pd.DataFrame(series)
+            st.subheader("Measurements")
+            columns = [
+                column
+                for column in ("date", "ndwi", "ndti", "water_percent", "ice_percent", "valid_pixels")
+                if column in df
+            ]
+            st.dataframe(df[columns], use_container_width=True)
+
+        if st.checkbox("Show chart interpretation", key="show_interp", value=False):
+            st.subheader("Chart interpretation")
+            st.markdown(
+                analysis.get("graph_interpretation")
+                or _fallback_chart_interpretation(analysis, analysis.get("algae", {}))
+            )
+    else:
+        st.info("No observations are available. Submit a new request to run another analysis.")
+
+    st.subheader("Measurement quality and limitations")
     quality = analysis.get("quality_summary", {})
-    st.write(f"- Počet platných pixelů: {quality.get('valid_pixels', 'neuvedeno')}")
-    st.write(f"- Dostupnost dat: {quality.get('data_quality', 'neznámá')}")
-    st.write(f"- Omezení: {quality.get('limitations', 'Nejsou uplatněna žádná zvláštní omezení.')}")
-    st.write(f"- AI interpretace: {analysis.get('warning', 'Bez poznámek.')}")
+    st.write(f"- Valid pixels: {quality.get('valid_pixels', 'not reported')}")
+    st.write(f"- Data availability: {quality.get('data_quality', 'unknown')}")
+    st.write(f"- Limitations: {quality.get('limitations', 'No specific limitations reported.')}")
+    st.write(f"- AI/data note: {analysis.get('warning', 'No additional notes.')}")
 
 
 main()

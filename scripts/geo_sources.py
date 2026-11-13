@@ -10,6 +10,24 @@ from scripts import demo_data
 RUIAN_URL = "https://ags.cuzk.gov.cz/arcgis/rest/services/RUIAN/MapServer/12/query"
 ZABAGED_URL = "https://ags.cuzk.cz/arcgis/rest/services/ZABAGED_POLOHOPIS/MapServer/132/query"
 REQUEST_TIMEOUT = 25
+WATER_BODY_TYPES = {
+    "1": "reservoir",
+    "2": "pond",
+    "3": "artificial lake",
+    "4": "natural lake",
+    "5": "backwater pool",
+    "6": "swimming area",
+    "7": "fish-farming pond",
+    "8": "settling basin",
+    "9": "other water body",
+    "10": "unspecified water body",
+}
+WATER_BODY_TYPE_CODES = {
+    "pond": ("2",),
+    "reservoir": ("1",),
+    "lake": ("3", "4"),
+    "all": tuple(WATER_BODY_TYPES),
+}
 
 
 def _call_arcgis(url: str, params: dict[str, Any]) -> dict[str, Any]:
@@ -68,6 +86,7 @@ def _approximate_location(geometry: dict[str, Any] | None) -> dict[str, float] |
 
 def _normalise_pond_result(feature: dict[str, Any]) -> dict[str, Any]:
     attrs = feature.get("attributes") or {}
+    type_code = str(attrs.get("typ_vp_k") or "")
     area = attrs.get("Shape_Area")
     if area is None:
         area = attrs.get("ploscha")
@@ -81,8 +100,8 @@ def _normalise_pond_result(feature: dict[str, Any]) -> dict[str, Any]:
         or attrs.get("nazev_vp")
         or attrs.get("jmeno")
         or attrs.get("name")
-        or "Bezejmenný rybník"
     )
+    water_body_type = WATER_BODY_TYPES.get(type_code, "water body")
     pond_id = (
         attrs.get("fid_zbg")
         or attrs.get("OBJECTID")
@@ -94,7 +113,8 @@ def _normalise_pond_result(feature: dict[str, Any]) -> dict[str, Any]:
     geometry = _normalise_geometry(feature.get("geometry"))
     return {
         "pond_id": str(pond_id),
-        "name": str(name) if name else "Bezejmenný rybník",
+        "name": str(name) if name else f"Unnamed {water_body_type}",
+        "water_body_type": water_body_type,
         "area_m2": int(round(area_val)),
         "geometry": geometry,
         "approx_location": _approximate_location(geometry),
@@ -114,11 +134,18 @@ def _select_municipality_in_response(features: list[dict[str, Any]], target: str
     return features[0] if features else None
 
 
-def find_ponds(municipality: str, pond_name: str | None = None) -> dict[str, Any]:
+def find_ponds(
+    municipality: str,
+    pond_name: str | None = None,
+    water_body_type: str = "pond",
+) -> dict[str, Any]:
     municipality = (municipality or "").strip()
     pond_name = (pond_name or "").strip()
+    type_codes = WATER_BODY_TYPE_CODES.get(water_body_type)
+    if type_codes is None:
+        raise ValueError(f"Unsupported water-body type: {water_body_type}")
     if not municipality:
-        return {"status": "not_found", "message": "Chybí název obce. Uveďte prosím obec, ve které chcete hledat rybník."}
+        return {"status": "not_found", "message": "A municipality is required."}
 
     try:
         name_variants = [municipality]
@@ -144,7 +171,7 @@ def find_ponds(municipality: str, pond_name: str | None = None) -> dict[str, Any
             return {
                 "status": "not_found",
                 "municipality": municipality,
-                "message": f"Obec '{municipality}' nebyla nalezena v RÚIAN. Zkontrolujte prosím její název.",
+                "message": f"Municipality '{municipality}' was not found in RÚIAN.",
                 "candidates": [],
             }
         municipality = str((community.get("attributes") or {}).get("nazev") or municipality)
@@ -152,8 +179,9 @@ def find_ponds(municipality: str, pond_name: str | None = None) -> dict[str, Any
         if community_geometry is None:
             raise ValueError("Municipality geometry not available")
 
+        type_filter = ", ".join(f"'{code}'" for code in type_codes)
         payload = {
-            "where": "typ_vp_k = '2'",
+            "where": f"typ_vp_k IN ({type_filter})",
             "geometry": json.dumps(community_geometry),
             "geometryType": "esriGeometryPolygon",
             "spatialRel": "esriSpatialRelIntersects",
@@ -168,9 +196,7 @@ def find_ponds(municipality: str, pond_name: str | None = None) -> dict[str, Any
         cleaned: list[dict[str, Any]] = []
         for feature in pond_features:
             attrs = feature.get("attributes") or {}
-            if isinstance(attrs.get("typ_vp_k"), str) and attrs.get("typ_vp_k") != "2":
-                continue
-            if attrs.get("typ_vp_k") not in ("2", 2):
+            if str(attrs.get("typ_vp_k") or "") not in type_codes:
                 continue
             cleaned.append(_normalise_pond_result(feature))
 
@@ -179,10 +205,14 @@ def find_ponds(municipality: str, pond_name: str | None = None) -> dict[str, Any
             cleaned = [item for item in cleaned if lowered in item["name"].lower()]
 
         if not cleaned:
+            type_label = "water body" if water_body_type == "all" else water_body_type
             return {
                 "status": "not_found",
                 "municipality": municipality,
-                "message": f"V obci '{municipality}' nebyl nalezen žádný rybník odpovídající filtru. Zkuste prosím upřesnit název rybníka.",
+                "message": (
+                    f"No {type_label.replace('_', ' ')} matching the filter was found "
+                    f"in '{municipality}'. Try a different name or water-body type."
+                ),
                 "candidates": [],
             }
 
@@ -197,6 +227,7 @@ def find_ponds(municipality: str, pond_name: str | None = None) -> dict[str, Any
                         "number": 1,
                         "pond_id": result["pond_id"],
                         "name": result["name"],
+                        "water_body_type": result["water_body_type"],
                         "area_m2": result["area_m2"],
                         "approx_location": result["approx_location"],
                     }
@@ -208,6 +239,7 @@ def find_ponds(municipality: str, pond_name: str | None = None) -> dict[str, Any
                 "number": index + 1,
                 "pond_id": item["pond_id"],
                 "name": item["name"],
+                "water_body_type": item["water_body_type"],
                 "area_m2": item["area_m2"],
                 "approx_location": item["approx_location"],
             }
@@ -218,13 +250,13 @@ def find_ponds(municipality: str, pond_name: str | None = None) -> dict[str, Any
             "municipality": municipality,
             "result": cleaned,
             "candidates": candidates,
-            "message": "Bylo nalezeno více rybníků. Vyberte prosím konkrétní kandidáta.",
+            "message": "Multiple water bodies were found. Please choose one.",
         }
     except (requests.RequestException, ValueError, TypeError) as exc:
         return {
             "status": "error",
             "municipality": municipality,
-            "message": f"Vyhledávání rybníků se nepodařilo dokončit: {type(exc).__name__}. Zkuste to prosím později.",
+            "message": f"Water-body search failed ({type(exc).__name__}). Please try again later.",
             "candidates": [],
         }
 
@@ -238,6 +270,7 @@ def get_pond_by_id(pond_id: str) -> dict[str, Any] | None:
         return {
             "pond_id": demo_map[pond_id]["pond_id"],
             "name": demo_map[pond_id]["name"],
+            "water_body_type": demo_map[pond_id]["water_body_type"],
             "area_m2": demo_map[pond_id]["area_m2"],
             "geometry": demo_map[pond_id]["geometry"],
             "municipality": demo_map[pond_id]["municipality"],

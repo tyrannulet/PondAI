@@ -68,7 +68,32 @@ class PondSearchParsingTests(unittest.TestCase):
         ):
             result = agent.run_agent("Zkontrolujte rybníky v Praze", state)
 
-        find_ponds.assert_called_once_with("Praha", None)
+        find_ponds.assert_called_once_with("Praha", None, "pond")
         self.assertEqual(result["status"], "awaiting_choice")
         self.assertIsNone(state["selected_pond"])
         self.assertIsNone(state["last_pond_name"])
+
+    def test_english_water_body_requests_and_periods_are_understood(self):
+        prompt = "Find all water bodies in Prague for the last three months"
+
+        self.assertEqual(agent._extract_municipality(prompt), "Praha")
+        self.assertEqual(agent._extract_water_body_type(prompt), "all")
+        self.assertIsNotNone(agent._extract_date_range(prompt))
+
+    def test_reservoir_and_lake_requests_select_their_zabaged_types(self):
+        self.assertEqual(
+            agent._extract_water_body_type("Find reservoirs in Prague"),
+            "reservoir",
+        )
+        self.assertEqual(
+            agent._extract_water_body_type("Find lakes in Prague"),
+            "lake",
+        )
+        self.assertEqual(
+            agent._extract_pond_name("Find the reservoir named Slapy in Prague"),
+            "Slapy",
+        )
+
+    def test_chart_requests_enable_optional_charts_only_when_requested(self):
+        self.assertTrue(agent._requests_charts("Show me the charts"))
+        self.assertFalse(agent._requests_charts("Report the results without charts"))

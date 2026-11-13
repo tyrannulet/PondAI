@@ -89,3 +89,40 @@ Záznam významných změn a důvodů jejich provedení. Při dalších úpravá
 - Přidána konfigurace Streamlit (`.streamlit/credentials.toml` a `config.toml`) potlačující interaktivní dotaz na e-mail při prvním spuštění a vypínající telemetrii.
 - Upraven dávkový skript `Spustit PondWatch.bat`: přednostně detekuje a používá lokální virtuální prostředí `venv`/`.venv` namísto systémového Pythonu a v případě potřeby automaticky vytvoří `.venv`. Tím se brání selhání instalace závislostí z PyPI.
 
+## 2026-11-13 — English reports, optional charts, water types, and ice screening
+
+- Přeloženo uživatelské rozhraní Streamlitu, výchozí odpovědi a demo texty do angličtiny; parser dál přijímá české dotazy a nově rozumí i běžným anglickým formulacím a období „last N months“.
+- Výchozím výsledkem je srozumitelný slovní report s odhadem pokrytí vodou, srovnáním měsíčních NDCI signálů a jasným upozorněním, že satelitní indikátory nejsou laboratorní měření kvality vody. Grafy a tabulka se zobrazí pouze po zapnutí volby nebo žádosti o grafy.
+- Ověřený dotaz na ZABAGED vrstvu „Vodní plocha“ našel tyto kódy `typ_vp_k`: 1 přehradní nádrž, 2 rybník, 3 antropogenní jezero, 4 přírodní jezero, 5 výhonová tůně, 6 koupaliště, 7 rybniční sádka, 8 sedimentační nádrž, 9 ostatní vodní plocha a 10 neurčená vodní plocha. Vyhledávání nyní podporuje rybníky, nádrže, jezera a všechny mapované typy; výsledky zobrazují typ vodního útvaru.
+- Nakonfigurovaná WIC BYOC kolekce při ověření vrátila HTTP 403, proto aplikace netvrdí, že ji může číst. Pro screening možného ledu používá místo toho třídu „snow/ice“ (SCL 11) v Sentinel-2 a započítá jen intervaly s alespoň 10 platnými pixely a konzervativním prahem 15 % a dvou pixelů. Výsledek výslovně označuje jako možný sníh/led, nikoli potvrzené zamrznutí; žádné zjištění také nedokazuje, že plocha nikdy nezamrzla.
+- Živá kontrola Sentinel Hub pro jeden rybník v Řitce (leden 2025) úspěšně vrátila tři intervaly včetně nového `ice_percent`; první interval měl 76 platných pixelů a 0 % klasifikovaných jako sníh/led. Streamlit na portu 8502 odpovídal HTTP 200.
+- Přidány cílené regresní testy pro vodní typy, anglické parsování a data, volitelnost grafů, měsíční report a detekci možného ledu včetně případů s nedostatkem pixelů.
+
+## 2026-11-13 — sloučení verzí
+
+- Základ kódu a testů je `fe5d439` (`update 7`). Ze starších lokálních změn byla převzata pouze animace ikonek. README obsahuje původní dokumentaci i pracovní kontext jako historickou přílohu; historické záznamy nepopisují nutně současné chování.
+
+## 2026-11-13 — ikonky při přemýšlení
+
+- Oba načítací indikátory (chat i potvrzení rybníka) používají společnou animaci. Po uživatelském zúžení seznamu jsou povolené pouze tyto ikonky: 🎣 🐟 🚣 🏊 🛶 🏄 ⛵ 🏖️ 💧. Odstraněny byly bota, kolo, pták, větvička, košík, stan a pes (původní položky 9–15).
+- Ikonky se střídají po 1,2 sekundy pomocí CSS během běžného volání agenta. Indikátor se odstraní i při výjimce; při systémovém omezení animací zůstane první ikonka a text.
+- Ověření: všech 6 existujících testů rozhraní v `test_app.py` prošlo; `git diff --check` bez chyb. Testy neověřují časování animace v prohlížeči.
+
+## 2026-11-13 — kontrola chyb a regresní testy
+
+- `AAAA` a prázdné řetězce se rozpoznávají jako placeholdery, aby neaktivovaly volání s neplatnými údaji.
+- Přidána společná validace kalendářních dat a pořadí intervalu. Neplatné datum a nepřiměřený relativní počet měsíců vyvolají žádost o opravu místo pádu; samostatné ISO datum označuje jeden den.
+- Zrušena duplicitní modelová smyčka, která spouštěla nástroje a jejich výsledky zahazovala. Featherless dál normalizuje obce a interpretuje grafy; výběr a analýzu řídí místní kód. NDCI využívá stejnou satelitní odpověď jako ostatní grafy.
+- Chyba Sentinel Hub se předává jako chyba analýzy, ne jako dokončený výsledek. Chybějící hodnoty neprodukují nulový průměr, interval s nulou platných pixelů nemá platné indexy a součet mnoha málo spolehlivých intervalů nezvyšuje spolehlivost. Průměr NDCI už nepoužívá jen první pozorování.
+- Výběr kandidáta se odlišuje od zadání data; neplatné číslo zachovává nabídku. Nové hledání ruší starý filtr a staré grafy, včetně hledání jiného rybníka ve stejné obci.
+- Demo zachovává identitu a polygon vybraného rybníka, pokrývá celé období a u krátkého období zachová oba konce. Neznámé ID se nenahrazuje jiným demo rybníkem.
+- ArcGIS prstence jsou rozlišeny na samostatné polygony a otvory. Mapy podporují MultiPolygon i otvory a přibližné značky leží uvnitř geometrie. ID v ArcGIS dotazu je escapováno.
+- Ověření: všech 48 automatických testů prošlo, včetně 6 průchodů UI přes Streamlit AppTest; `compileall`, `pip check` a `git diff --check` bez chyb. Testy externí služby nahrazují a nečerpají kvótu. Příkaz je v README.
+- Samostatný živý test: Featherless normalizoval „v Řitce“ na „Řitka“, RÚIAN/ZABAGED vrátily 2 rybníky a analýza největšího za červen 2025 vrátila 2 intervaly včetně interpretace grafů. Jde o ověření integrace, nikoli laboratorní validaci indexů.
+- Server na `http://localhost:8502` odpovídá na kontrolu dostupnosti. Konfigurační soubory s API údaji nebyly při testování měněny.
+
+## 2026-11-13 — modernizace analytických grafů a widgetů
+
+- Implementován nový card-based analytický přehled (`_render_analytics_widget`): kompaktní karty pro jednotlivé metriky (vodní plocha, NDWI, NDTI, NDCI a případný led) s minimalistickými sparkline křivkami bez rušivých os a popisků.
+- Pod každým sparkline grafem jsou agregované statistiky (průměr, trend Δ se směrovou šipkou a barevným zvýrazněním, rozsah hodnot / screeningová kategorie).
+- Rozklikávací interaktivní detailní graf (`st.expander`) pro každou měřenou veličinu s posuvníkem časového rozsahu (rangeslider), hover popisky, zobrazením min/max bodů a referenčními pásmy (např. limity NDCI pro algální biomasu).

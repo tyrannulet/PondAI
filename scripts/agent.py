@@ -14,6 +14,7 @@ from scripts.geo_sources import find_ponds
 from scripts.satellite import analyze_algae_bloom, analyze_pond
 
 MUNICIPALITY_ALIASES = {
+    "prague": "Praha",
     "praze": "Praha",
     "mníšku pod brdy": "Mníšek pod Brdy",
     "valmez": "Valašské Meziříčí",
@@ -31,15 +32,20 @@ MUNICIPALITY_ALIASES = {
 MONTH_COUNTS = {
     "jeden": 1,
     "jednu": 1,
+    "one": 1,
     "dva": 2,
     "dvě": 2,
+    "two": 2,
     "tri": 3,
     "tři": 3,
     "třech": 3,
+    "three": 3,
     "čtyři": 4,
     "ctyri": 4,
+    "four": 4,
     "pět": 5,
     "pet": 5,
+    "five": 5,
 }
 
 try:
@@ -49,6 +55,10 @@ except ImportError:  # pragma: no cover
     OpenAIError = Exception
 
 LOGGER = logging.getLogger(__name__)
+ENGLISH_MONTHS = (
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+)
 
 def _extract_years(text: str) -> list[str]:
     return re.findall(r"\b(20\d{2})\b", text)
@@ -64,13 +74,13 @@ def _extract_date_range(prompt: str) -> tuple[str | None, str | None]:
         end_year = years[-1]
         return f"{start_year}-01-01", f"{end_year}-12-31"
     month_match = re.search(
-        r"\bposledn(?:í|ím|ích)\s+(?:(\d+|jeden|jednu|dva|dvě|tri|tři|třech|čtyři|ctyri|pět|pet)\s+)?měsíc(?:e|ů)?\b",
+        r"\b(?:posledn(?:í|ím|ích)\s+(?:(\d+|jeden|jednu|dva|dvě|tri|tři|třech|čtyři|ctyri|pět|pet)\s+)?měsíc(?:e|ů)?|(?:last|past|previous)\s+(?:(\d+|one|two|three|four|five)\s+)?months?)\b",
         prompt,
         flags=re.IGNORECASE,
     )
     if month_match:
-        count = month_match.group(1)
-        month_count = int(count) if count and count.isdigit() else MONTH_COUNTS.get((count or "jeden").casefold(), 1)
+        count = month_match.group(1) or month_match.group(2)
+        month_count = int(count) if count and count.isdigit() else MONTH_COUNTS.get((count or "one").casefold(), 1)
         end = date.today()
         month_index = end.year * 12 + end.month - 1 - month_count
         year, month = divmod(month_index, 12)
@@ -101,15 +111,14 @@ def _normalize_municipality_with_featherless(prompt: str) -> str | None:
                 {
                     "role": "system",
                     "content": (
-                        "Nejprve pochop celý uživatelský požadavek a z něj urč jednu obec, "
-                        "ve které se má hledat rybník. Odděl název obce od časového období "
-                        "(například „v Řitce v roce 2025“ obsahuje obec Řitka a rok 2025). "
-                        "Převeď skloňovaný název do úředního základního tvaru používaného "
-                        "v RÚIAN (např. Řitce → Řitka), rozpoznej známé zkratky a místní "
-                        "názvy (např. Valmez → Valašské Meziříčí). Obec nevymýšlej a "
-                        "nepovažuj rok ani jinou časovou informaci za název obce. Vrať "
-                        "pouze JSON objekt {\"municipality\": \"...\"}; pokud obec v "
-                        "požadavku není nebo si nejsi jistý, vrať "
+                        "Understand the full request and identify the Czech municipality "
+                        "where the water body should be searched. Separate the municipality "
+                        "from the date range (for example, 'in Řitce in 2025' means "
+                        "municipality Řitka and year 2025). Convert inflected Czech names "
+                        "to the official RÚIAN base form, and recognize common aliases "
+                        "(Valmez means Valašské Meziříčí). Never invent a municipality or "
+                        "treat a year as one. Return only JSON "
+                        "{\"municipality\": \"...\"}; if absent or uncertain, return "
                         "{\"municipality\": null}."
                     ),
                 },
@@ -134,11 +143,14 @@ def _normalize_municipality_with_featherless(prompt: str) -> str | None:
 
 
 def _extract_municipality(prompt: str) -> str | None:
-    stop_words = r"(?:a|za|od|do|pro|během|roce|roku|poslední|minulý|minulém|celý|celou)"
+    stop_words = (
+        r"(?:a|za|od|do|pro|během|roce|roku|poslední|minulý|minulém|celý|celou|"
+        r"for|during|over|from|to|last|past|previous|year)"
+    )
+    location = r"(?:v|ve|in|near|around)"
     patterns = [
-        rf"\b(?:v|ve)\s+(?:městě|obci)\s+([A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽa-záčďéěíňóřšťúůýž\s-]+?)(?=\s+{stop_words}\b|[,;.!?]|$)",
-        rf"\b(?:v|ve)\s+([A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽa-záčďéěíňóřšťúůýž\s-]+?)(?=\s+{stop_words}\b|\s+(?:v|ve)\s+(?:roce|roku)\b|[,;.!?]|$)",
-        rf"\b(?:obec|město|městě)\s+([A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽa-záčďéěíňóřšťúůýž\s-]+?)(?=\s+{stop_words}\b|[,;.!?]|$)",
+        rf"\b{location}\s+(?:(?:the\s+)?(?:city|town|municipality)\s+of\s+|(?:městě|obci)\s+)?([A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽa-záčďéěíňóřšťúůýž\s-]+?)(?=\s+{stop_words}\b|\s+(?:v|ve|in)\s+(?:roce|roku|year)\b|[,;.!?]|$)",
+        rf"\b(?:obec|město|městě|city|town|municipality)\s+(?:of\s+)?([A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽa-záčďéěíňóřšťúůýž\s-]+?)(?=\s+{stop_words}\b|[,;.!?]|$)",
     ]
     for pattern in patterns:
         match = re.search(pattern, prompt, flags=re.IGNORECASE)
@@ -152,7 +164,8 @@ def _extract_municipality(prompt: str) -> str | None:
 def _extract_pond_name(prompt: str) -> str | None:
     name_pattern = (
         r"([A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽa-záčďéěíňóřšťúůýž\s-]+?)"
-        r"(?=\s+(?:v|ve|u|a|za|od|do|pro|během|roce|roku|analyzuj|analyzovat)\b"
+        r"(?=\s+(?:v|ve|u|a|za|od|do|pro|během|roce|roku|analyzuj|analyzovat|"
+        r"in|near|at|around|by|for|during|last|past|previous|year|analyze|analyse|named|called)\b"
         r"|[,;.!?]|$)"
     )
     match = re.search(
@@ -162,7 +175,19 @@ def _extract_pond_name(prompt: str) -> str | None:
     )
     if not match:
         match = re.search(
+            rf"\b(?:ponds?|reservoirs?|lakes?|water bodies?)\s+(?:named|called)\s+{name_pattern}",
+            prompt,
+            flags=re.IGNORECASE,
+        )
+    if not match:
+        match = re.search(
             rf"\brybník(?:u|a)?\s+(?!v\b|ve\b|u\b|a\b|na\b|podle\b|městě\b|obci\b){name_pattern}",
+            prompt,
+            flags=re.IGNORECASE,
+        )
+    if not match:
+        match = re.search(
+            rf"\b(?:ponds?|reservoirs?|lakes?)\s+(?!in\b|near\b|at\b|around\b|by\b|named\b|called\b){name_pattern}",
             prompt,
             flags=re.IGNORECASE,
         )
@@ -177,25 +202,40 @@ def _is_broad_pond_search(prompt: str) -> bool:
     return bool(
         re.search(r"\b(?:všechny|všech|každé|každý)\b", lowered)
         or re.search(r"\brybník(?:y|ů|ům|ech)\b", lowered)
+        or re.search(r"\b(?:ponds|reservoirs|lakes|water bodies)\b", lowered)
     )
+
+
+def _extract_water_body_type(prompt: str) -> str:
+    lowered = prompt.casefold()
+    if re.search(r"\b(?:all water bodies|all water features|water bodies|water body|všechny vodní plochy|vodní plochy)\b", lowered):
+        return "all"
+    if re.search(r"\b(?:reservoirs?|water reservoirs?|dams?|přehrad(?:a|y|ní)|vodní nádrž(?:e|í)?|nádrž(?:e|í))\b", lowered):
+        return "reservoir"
+    if re.search(r"\b(?:lakes?|jezer(?:o|a|u|em))\b", lowered):
+        return "lake"
+    return "pond"
+
+
+def _requests_charts(prompt: str) -> bool:
+    lowered = prompt.casefold()
+    if re.search(r"\b(?:no|hide|without|don't show|do not show)\s+(?:the\s+)?(?:charts?|graphs?|plots?)\b", lowered):
+        return False
+    return bool(re.search(r"\b(?:charts?|graphs?|plots?|graf(?:y|u|em)?|diagram(?:y|u)?)\b", lowered))
 
 
 def _dispatch_tool(function_name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     allowed = {
-        "find_ponds": lambda: find_ponds(arguments.get("municipality", ""), arguments.get("pond_name")),
+        "find_ponds": lambda: find_ponds(
+            arguments.get("municipality", ""),
+            arguments.get("pond_name"),
+            arguments.get("water_body_type", "pond"),
+        ),
         "analyze_pond": lambda: analyze_pond(arguments.get("pond_id", ""), arguments.get("date_from", ""), arguments.get("date_to", "")),
     }
     if function_name not in allowed:
-        raise ValueError(f"Nedovolený nástroj: {function_name}")
+        raise ValueError(f"Unsupported tool: {function_name}")
     return allowed[function_name]()
-
-
-def _ndci_summary(algae: dict[str, Any]) -> str:
-    trend = algae.get("ndci_trend") or []
-    if not trend:
-        return "n/a"
-    first = trend[0].get("ndci")
-    return str(first) if first is not None else "n/a"
 
 
 def _series_values(timeseries: list[dict[str, Any]], metric: str) -> list[tuple[str, float]]:
@@ -205,37 +245,56 @@ def _series_values(timeseries: list[dict[str, Any]], metric: str) -> list[tuple[
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             continue
         if math.isfinite(value):
-            values.append((str(item.get("date") or "neznámé datum"), float(value)))
+            values.append((str(item.get("date") or "unknown date"), float(value)))
     return values
+
+
+def _monthly_average_values(
+    timeseries: list[dict[str, Any]], metric: str
+) -> dict[str, float]:
+    monthly: dict[str, list[float]] = {}
+    for item in timeseries:
+        value = item.get(metric)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        try:
+            month_key = date.fromisoformat(str(item.get("date", ""))).strftime("%Y-%m")
+        except ValueError:
+            continue
+        monthly.setdefault(month_key, []).append(float(value))
+    return {
+        month: sum(values) / len(values)
+        for month, values in sorted(monthly.items())
+    }
 
 
 def _summarize_chart(metric: str, label: str, timeseries: list[dict[str, Any]]) -> str:
     values = _series_values(timeseries, metric)
     if not values:
         return (
-            f"{label}: za toto období nejsou platné hodnoty k interpretaci "
-            f"({len(timeseries)} intervalů bez hodnot)."
+            f"{label}: no valid values were available to interpret "
+            f"({len(timeseries)} intervals without values)."
         )
     start_date, start_value = values[0]
     end_date, end_value = values[-1]
     minimum = min(value for _, value in values)
     maximum = max(value for _, value in values)
     if len(values) == 1:
-        trend = f"Jediná platná hodnota je {start_value:g} ({start_date})"
+        trend = f"The only valid value is {start_value:g} ({start_date})"
     else:
         change = end_value - start_value
-        direction = "vzrostla" if change > 0 else "klesla" if change < 0 else "zůstala přibližně stejná"
+        direction = "increased" if change > 0 else "decreased" if change < 0 else "remained approximately stable"
         trend = (
-            f"mezi {start_date} a {end_date} {direction} "
-            f"z {start_value:g} na {end_value:g}"
+            f"{direction} from {start_value:g} to {end_value:g} "
+            f"between {start_date} and {end_date}"
         )
     summary = (
-        f"{label}: {trend}; rozsah pozorovaných hodnot je "
-        f"{minimum:g} až {maximum:g}."
+        f"{label}: {trend}; observed values ranged from "
+        f"{minimum:g} to {maximum:g}."
     )
     missing_count = len(timeseries) - len(values)
     if missing_count:
-        summary += f" Bez platné hodnoty je {missing_count} z {len(timeseries)} intervalů."
+        summary += f" {missing_count} of {len(timeseries)} intervals had no valid value."
     return summary
 
 
@@ -245,19 +304,21 @@ def _fallback_chart_interpretation(
     timeseries = analysis.get("timeseries") or []
     algae_timeseries = algae.get("ndci_trend") or timeseries
     summaries = [
-        _summarize_chart("water_percent", "Podíl vodních pixelů", timeseries)
-        + " Jde o podíl klasifikovaných pixelů uvnitř polygonu, ne o hladinu či objem vody.",
+        _summarize_chart("water_percent", "Classified water-pixel share", timeseries)
+        + " This is the share of classified pixels inside the mapped boundary, not water level or volume.",
         _summarize_chart("ndwi", "NDWI", timeseries)
-        + " Je to průměrný spektrální indikátor vody, ne procento vodní plochy.",
+        + " This is an average spectral water indicator, not the percentage of water-covered area.",
         _summarize_chart("ndti", "NDTI", timeseries)
-        + " Je to optický proxy suspendovaných částic, ne laboratorní měření zákalu.",
+        + " This is an optical proxy for suspended particles, not a laboratory turbidity measurement.",
         _summarize_chart("ndci", "NDCI", algae_timeseries)
-        + " Je to orientační proxy chlorofylu/fytoplanktonu, ne jeho přímé měření.",
+        + " This is a rough proxy for chlorophyll/phytoplankton, not a direct measurement.",
+        _summarize_chart("ice_percent", "Pixels classified as snow/ice", timeseries)
+        + " This is a satellite screening classification, not confirmation that the water was frozen.",
     ]
     return (
         "\n".join(f"- {summary}" for summary in summaries)
-        + "\nOmezení: Sentinel-2 pixely o velikosti 10 m mohou zahrnovat současně "
-        "vodu i břeh; indexy nejsou laboratorní rozbor."
+        + "\nLimitation: Sentinel-2 pixels may include both water and shore; "
+        "these indices are not laboratory measurements."
     )
 
 
@@ -267,7 +328,7 @@ def _interpret_analysis_charts(
     fallback = _fallback_chart_interpretation(analysis, algae)
     if not has_real_featherless() or OpenAI is None:
         return (
-            "Automatické shrnutí grafů (AI interpretace není nakonfigurována):\n"
+            "Automatic chart summary (AI interpretation is not configured):\n"
             + fallback
         )
 
@@ -281,12 +342,12 @@ def _interpret_analysis_charts(
         "period": {
             "from": analysis.get("date_from"),
             "to": analysis.get("date_to"),
-            "aggregation": "desetidenní časové intervaly",
+            "aggregation": "10-day intervals",
         },
         "data_quality": analysis.get("quality_summary"),
         "precalculated_trends": {
             "water_percent": _summarize_chart(
-                "water_percent", "Podíl vodních pixelů", analysis.get("timeseries") or []
+                "water_percent", "Classified water-pixel share", analysis.get("timeseries") or []
             ),
             "ndwi": _summarize_chart("ndwi", "NDWI", analysis.get("timeseries") or []),
             "ndti": _summarize_chart("ndti", "NDTI", analysis.get("timeseries") or []),
@@ -295,11 +356,14 @@ def _interpret_analysis_charts(
                 "NDCI",
                 algae.get("ndci_trend") or analysis.get("timeseries") or [],
             ),
+            "possible_ice": _summarize_chart(
+                "ice_percent", "Pixels classified as snow/ice", analysis.get("timeseries") or []
+            ),
         },
         "water_area_estimate": {
             "definition": (
-                "Procento platných pixelů uvnitř rybničního polygonu, jejichž NDWI "
-                "překročilo práh 0; nejde o výšku hladiny ani objem vody."
+                "Percentage of valid pixels inside the mapped water-body polygon with NDWI "
+                "above 0; this is not water level or volume."
             ),
             "observations": [
                 {
@@ -312,11 +376,11 @@ def _interpret_analysis_charts(
         },
         "optical_indices": {
             "definition": (
-                "NDWI = (zelené - NIR)/(zelené + NIR), orientační spektrální "
-                "indikátor vody. NDTI = (červené - zelené)/(červené + zelené), "
-                "optický proxy suspendovaných látek, ne laboratorní zákal. "
-                "NDCI = (red-edge - červené)/(red-edge + červené), screening "
-                "chlorofylu/fytoplanktonu, ne potvrzení sinic ani toxinů."
+                "NDWI = (green - NIR)/(green + NIR), a spectral water indicator. "
+                "NDTI = (red - green)/(red + green), an optical proxy for suspended "
+                "particles, not laboratory turbidity. NDCI = (red-edge - red)/"
+                "(red-edge + red), a rough chlorophyll/phytoplankton screening signal, "
+                "not confirmation of cyanobacteria or toxins."
             ),
             "observations": [
                 {
@@ -337,22 +401,23 @@ def _interpret_analysis_charts(
         },
     }
     system_prompt = (
-        "Jsi expert na geoinformatiku a dálkový průzkum Země. Interpretuj pouze "
-        "dodaná měření. Odpověz česky přesně čtyřmi částmi a těmito nadpisy: "
-        "„Podíl vodních pixelů“, „NDWI“, „NDTI“, „NDCI“. Použij předpočítané trendy "
-        "jako zdroj pravdy pro rozsah a směr. V každé části maximálně dvěma krátkými "
-        "větami popiš trend a chybějící data; odpověď dokonči. Hodnoty null zcela "
-        "vynech z rozsahu a nikdy je nepřiřazuj konkrétní odchylce. Neuváděj příčiny, "
-        "hypotézy ani spekulativní výrazy jako "
-        "„může naznačovat“. Podíl vody je procento pixelů s NDWI > 0 uvnitř pevného "
-        "polygonu, ne změna rozlohy, hladina ani objem. Nulový podíl při kladném "
-        "počtu validních pixelů je skutečný výsledek klasifikace, ne chybějící hodnota. "
-        "NDWI je průměrný spektrální index, nikoli podíl pixelů; 10m pixely mohou "
-        "míchat vodu a břeh. NDTI je optický proxy suspendovaných částic, ne laboratorní "
-        "zákal. NDCI je orientační proxy chlorofylu/fytoplanktonu, ne jeho přímé "
-        "měření ani potvrzení sinic/toxinů. Hodnoty označené null nebo s 0 validními "
-        "pixely jsou nedostupné. Uváděj počty pixelů přesně podle dat a neoznačuj "
-        "je za nízké bez podkladu. Netvrď laboratorní kvalitu vody ani zamrznutí."
+        "You are an expert in geospatial analysis and remote sensing. Interpret only "
+        "the supplied measurements. Reply in exactly five sections titled 'Water-pixel "
+        "share', 'NDWI', 'NDTI', 'NDCI', and 'Possible snow/ice classification'. Use the precomputed trends as the source "
+        "of truth for ranges and direction. In at most two short sentences per section, "
+        "describe the trend and missing data, and finish the response. Exclude null "
+        "values from ranges and never attribute a specific change to missing data. "
+        "Do not invent causes or speculate. Water share is the percentage of pixels "
+        "with NDWI > 0 inside a fixed polygon, not surface-area change, water level, "
+        "or volume. A 0% share with valid pixels is a real classification result, not "
+        "missing data. NDWI is an average spectral index, not a pixel share; 10 m "
+        "pixels can mix water and shore. NDTI is an optical proxy for suspended "
+        "particles, not laboratory turbidity. NDCI is a rough chlorophyll/"
+        "phytoplankton proxy, not a direct measurement or confirmation of "
+        "cyanobacteria or toxins. Snow/ice classifications are screening results, not "
+        "confirmation that a water surface was frozen. Null values or zero valid pixels mean unavailable "
+        "data. Report pixel counts exactly and do not call them low without evidence. "
+        "Do not claim laboratory water quality or confirmed freezing."
     )
     try:
         client = OpenAI(
@@ -376,7 +441,7 @@ def _interpret_analysis_charts(
         choice = response.choices[0]
         content = choice.message.content
         if getattr(choice, "finish_reason", None) == "length":
-            raise ValueError("AI interpretace byla useknuta limitem tokenů.")
+            raise ValueError("AI chart interpretation was truncated by the token limit.")
         if isinstance(content, str) and content.strip():
             interpretation = content.strip()
             normalized = "".join(
@@ -385,80 +450,165 @@ def _interpret_analysis_charts(
                 if not unicodedata.combining(character)
             )
             speculative_phrases = (
-                "muze ",
-                "mohou ",
-                "naznac",
-                "pravdepodob",
-                "sezon",
-                "znecisten",
-                "vlivem",
+                "may ",
+                "might ",
+                "suggest",
+                "probably",
+                "season",
+                "pollution",
+                "due to",
             )
             if any(phrase in normalized for phrase in speculative_phrases):
-                raise ValueError("AI uvedla nepodložené příčiny trendů.")
-            if all(label in normalized for label in ("ndwi", "ndti", "ndci")) and (
-                "vodnich pixel" in normalized or "podil vody" in normalized
+                raise ValueError("AI included unsupported explanations for observed trends.")
+            if all(label in normalized for label in ("ndwi", "ndti", "ndci", "ice")) and (
+                "water-pixel share" in normalized or "water share" in normalized
             ):
                 return interpretation
-            raise ValueError("AI neinterpretovala všechny čtyři grafy.")
-        raise ValueError("Featherless vrátil prázdnou interpretaci grafů.")
+            raise ValueError("The AI did not interpret all four charts.")
+        raise ValueError("Featherless returned an empty chart interpretation.")
     except (OpenAIError, ValueError, TypeError, IndexError) as exc:
         LOGGER.warning(
             "Featherless chart interpretation failed (%s); using data summary.",
             type(exc).__name__,
         )
         reason = (
-            "AI nevrátila úplnou nebo dostatečně opatrnou interpretaci grafů"
+            "The AI returned an incomplete or insufficiently cautious chart interpretation"
             if isinstance(exc, ValueError)
-            else f"AI interpretace nebyla dostupná ({type(exc).__name__})"
+            else f"AI interpretation was unavailable ({type(exc).__name__})"
         )
         return (
             f"{reason}; "
-            "následuje automatické shrnutí naměřených trendů:\n"
+            "here is an automatic summary of the measured trends:\n"
             + fallback
         )
 
 
 def _describe_candidate(candidate: dict[str, Any], index: int) -> str:
     number = candidate.get("number", index + 1)
-    name = candidate.get("name") or "Bezejmenný rybník"
+    name = candidate.get("name") or "Unnamed water body"
     area = int(candidate.get("area_m2") or 0)
     area_text = f"{area:,}".replace(",", " ")
-    hectares = f"{area / 10_000:.2f}".replace(".", ",")
+    hectares = f"{area / 10_000:.2f}"
     location = candidate.get("approx_location") or {}
     location_text = ""
     if location.get("latitude") is not None and location.get("longitude") is not None:
         location_text = (
-            f", přibližně {location['latitude']:.4f}° N, "
+            f", approximately {location['latitude']:.4f}° N, "
             f"{location['longitude']:.4f}° E"
         )
-    return f"{number}. {name} — {area_text} m² ({hectares} ha){location_text}"
+    return f"{number}. {name} ({candidate.get('water_body_type', 'water body')}) — {area_text} m² ({hectares} ha){location_text}"
+
+
+def _plain_language_report(
+    water_body: dict[str, Any],
+    analysis: dict[str, Any],
+    algae: dict[str, Any],
+) -> str:
+    name = water_body.get("name", "Water body")
+    municipality = water_body.get("municipality")
+    location = f" in {municipality}" if municipality else ""
+    date_from = analysis.get("date_from", "unknown")
+    date_to = analysis.get("date_to", "unknown")
+    lines = [
+        f"## Satellite report: {name}{location}",
+        f"**Period:** {date_from} to {date_to}",
+    ]
+
+    timeseries = analysis.get("timeseries") or []
+    water_values = _series_values(timeseries, "water_percent")
+    if water_values:
+        start_date, start_share = water_values[0]
+        end_date, end_share = water_values[-1]
+        low = min(value for _, value in water_values)
+        high = max(value for _, value in water_values)
+        lines.append(
+            f"Satellite images classified {low:g}% to {high:g}% of the valid pixels "
+            f"inside the mapped boundary as water. The share changed from "
+            f"{start_share:g}% ({start_date}) to {end_share:g}% ({end_date}). "
+            "This estimates visible surface-water coverage, not water depth or volume."
+        )
+    else:
+        lines.append("There were no usable satellite observations of the water surface in this period.")
+
+    category = algae.get("category")
+    if category:
+        lines.append(
+            f"The satellite-based algae screening was: **{category}**. "
+            "This is an optical screening signal, not a laboratory water-quality or toxin test."
+        )
+    else:
+        lines.append(
+            "Water quality cannot be confirmed from these satellite indicators alone; "
+            "no laboratory measurements are included."
+        )
+
+    monthly_ndci = _monthly_average_values(timeseries, "ndci")
+    if len(monthly_ndci) > 1:
+        lowest_month = min(monthly_ndci, key=lambda month: monthly_ndci[month])
+        highest_month = max(monthly_ndci, key=lambda month: monthly_ndci[month])
+        if lowest_month != highest_month:
+            lowest_label = date.fromisoformat(f"{lowest_month}-01")
+            highest_label = date.fromisoformat(f"{highest_month}-01")
+            lines.append(
+                f"The algae-related satellite signal was lower in "
+                f"{ENGLISH_MONTHS[lowest_label.month - 1]} {lowest_label.year} "
+                f"({monthly_ndci[lowest_month]:.2f}) and higher in "
+                f"{ENGLISH_MONTHS[highest_label.month - 1]} {highest_label.year} "
+                f"({monthly_ndci[highest_month]:.2f}). A higher reading is not by "
+                "itself proof of poorer water quality."
+            )
+
+    ice = analysis.get("ice") or {}
+    ice_status = ice.get("status")
+    detections = ice.get("observations") or []
+    if ice_status == "possible_ice" and detections:
+        found = ", ".join(
+            f"{item.get('date')} ({item.get('ice_percent')}% of valid pixels)"
+            for item in detections
+        )
+        lines.append(
+            f"**Possible surface ice/snow classification:** {found}. "
+            "This is a satellite screening, not confirmation that the water itself was frozen. "
+            "A flag requires at least 10 valid pixels and at least 2 pixels (15% or more) "
+            "classified as snow/ice."
+        )
+    elif ice_status == "no_ice_detected":
+        lines.append(
+            f"No possible ice/snow was classified in {ice.get('usable_intervals', 0)} "
+            "usable satellite intervals. This does not prove that the water never froze; "
+            "clouds and gaps between satellite visits can hide short events."
+        )
+    elif ice_status == "not_available":
+        lines.append("Ice screening is unavailable for the simulated demo data.")
+    else:
+        lines.append(
+            "Ice status is inconclusive because there were too few clear, valid satellite pixels."
+        )
+
+    warning = analysis.get("warning")
+    if warning:
+        lines.append(f"**Data note:** {warning}")
+    return "\n\n".join(lines)
 
 
 def _analyze_selected_pond(
-    pond: dict[str, Any], date_from: str, date_to: str
+    pond: dict[str, Any],
+    date_from: str,
+    date_to: str,
+    include_charts: bool = False,
 ) -> dict[str, Any]:
     analysis = analyze_pond(pond["pond_id"], date_from, date_to)
     algae = analyze_algae_bloom(pond["pond_id"], date_from, date_to)
-    metrics = analysis.get("metrics", {})
-    chart_interpretation = _interpret_analysis_charts(pond, analysis, algae)
-    response = (
-        f"Vyhodnocení rybníka {pond['name']} ({pond.get('area_m2', 'neznámá')} m²) "
-        f"pro období {date_from} až {date_to}.\n"
-        f"{analysis.get('warning', '')}\n"
-        f"Průměrný NDWI: {metrics.get('average_ndwi', 'n/a')}\n"
-        f"Průměrný NDTI: {metrics.get('average_ndti', 'n/a')}\n"
-        f"Průměrný NDCI: {_ndci_summary(algae)}\n"
-        f"{algae.get('interpretation', '')}\n"
-        "Podíl vodních pixelů je odhad vodní plochy v polygonu, ne měření výšky hladiny "
-        "ani objemu vody. Zalednění WIC zatím aplikace nedokáže ověřit.\n\n"
-        "Interpretace grafů:\n"
-        f"{chart_interpretation}"
+    report = _plain_language_report(pond, analysis, algae)
+    chart_interpretation = (
+        _interpret_analysis_charts(pond, analysis, algae) if include_charts else None
     )
     return {
-        "response": response,
+        "response": report,
         "analysis": {
             **analysis,
             "algae": algae,
+            "report": report,
             "graph_interpretation": chart_interpretation,
         },
         "selected_pond": pond,
@@ -474,7 +624,7 @@ def _call_featherless_tools(
     config = get_featherless_config()
     api_key = config.get("FEATHERLESS_API_KEY")
     if not has_real_featherless() or OpenAI is None:
-        raise ValueError("Featherless není nakonfigurován.")
+        raise ValueError("Featherless is not configured.")
 
     client = OpenAI(base_url=config.get("FEATHERLESS_BASE_URL", "https://api.featherless.ai/v1"), api_key=api_key)
     tools = [
@@ -482,12 +632,17 @@ def _call_featherless_tools(
             "type": "function",
             "function": {
                 "name": "find_ponds",
-                "description": "Vyhledá rybníky v obci včetně bezejmenných kandidátů a vrátí seznam možností.",
+                "description": "Search a Czech municipality for ponds, reservoirs, lakes, or all mapped water bodies and return candidates.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "municipality": {"type": "string", "description": "Název obce v Česku"},
-                        "pond_name": {"type": "string", "description": "Volitelný název rybníka, pokud je známý"},
+                        "municipality": {"type": "string", "description": "Czech municipality name"},
+                        "pond_name": {"type": "string", "description": "Optional water-body name"},
+                        "water_body_type": {
+                            "type": "string",
+                            "enum": ["pond", "reservoir", "lake", "all"],
+                            "description": "Select pond, reservoir, lake, or all mapped water bodies",
+                        },
                     },
                     "required": ["municipality"],
                 },
@@ -497,13 +652,13 @@ def _call_featherless_tools(
             "type": "function",
             "function": {
                 "name": "analyze_pond",
-                "description": "Analyzuje satelitní data pro vybraný rybník v zadaném časovém období.",
+                "description": "Analyze satellite observations for a selected water body and date range.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "pond_id": {"type": "string", "description": "ID rybníka z geodat"},
-                        "date_from": {"type": "string", "description": "Počáteční datum ve formátu YYYY-MM-DD"},
-                        "date_to": {"type": "string", "description": "Konečné datum ve formátu YYYY-MM-DD"},
+                        "pond_id": {"type": "string", "description": "Water-body ID from the geodata search"},
+                        "date_from": {"type": "string", "description": "Start date in YYYY-MM-DD format"},
+                        "date_to": {"type": "string", "description": "End date in YYYY-MM-DD format"},
                     },
                     "required": ["pond_id", "date_from", "date_to"],
                 },
@@ -512,24 +667,27 @@ def _call_featherless_tools(
     ]
 
     system_prompt = (
-        "Jsi asistent pro PondWatch AI. Rozumíš českým dotazům o rybnících, jejich "
-        "přezdívkám i skloňovaným názvům obcí. Před vyhledáním obce použij její základní "
-        "tvar. Proveď pouze lokální nástroje find_ponds a analyze_pond. Odpovídej česky. "
-        "Jsi také odborník na geoinformatiku a dálkový průzkum Země. NDWI je spektrální "
-        "indikátor vody; podíl vody je klasifikace pixelů uvnitř polygonu, ne hladina "
-        "ani objem. Sentinel-2 pixel 10 m může míchat vodu a břeh; výsledek ovlivňují "
-        "oblačnost, stíny, vegetace, zákal, sezóna a počet platných pixelů. NDTI je "
-        "pouze optický proxy suspendovaných látek, NDCI orientační screening "
-        "chlorofylu/fytoplanktonu; žádný z indexů není laboratorní měření. Po analýze "
-        "vždy na konci interpretuj každý zobrazený graf, trend i chybějící data, "
-        "zohledni spolehlivost a nevyvozuj nepodložené příčiny. Pokud WIC data nejsou "
-        "ve výsledku, netvrď, zda rybník zamrzl."
+        "You are PondWatch AI, an assistant for Czech water bodies. Understand Czech "
+        "and English requests, including inflected municipality names and local aliases. "
+        "Normalize a municipality before searching, then use only the local find_ponds "
+        "and analyze_pond tools. Reply in English. Write a concise, plain-language "
+        "report by default; only discuss charts when the user asks for them. You are "
+        "also an expert in geospatial analysis and remote sensing. NDWI is a spectral "
+        "water indicator; water-pixel share is a classification inside a fixed polygon, "
+        "not water level or volume. Sentinel-2 pixels can mix water and shore, and "
+        "clouds, shadows, vegetation, turbidity, season, and valid-pixel count affect "
+        "results. NDTI is only an optical proxy for suspended particles and NDCI is a "
+        "rough chlorophyll/phytoplankton screening signal; neither is a laboratory "
+        "measurement. Interpret available data and missing observations without "
+        "inventing causes. Snow/ice-class pixels are only a satellite screening, not "
+        "confirmation that the water itself was frozen. Do not claim laboratory water "
+        "quality or confirmed freezing."
     )
     if normalized_municipality:
         system_prompt += (
-            f" Předchozí normalizační krok určil základní tvar obce "
-            f"„{normalized_municipality}“. Přesně tento název použij jako municipality "
-            "v nástroji find_ponds."
+            f" The municipality normalization step identified the official name "
+            f"'{normalized_municipality}'. Use exactly this name as municipality in "
+            "the find_ponds tool."
         )
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
@@ -545,13 +703,15 @@ def _call_featherless_tools(
         message = completion.choices[0].message
         tool_calls = getattr(message, "tool_calls", None) or []
         if not tool_calls:
-            return {"response": message.content or "Nemám k dispozici finální odpověď.", "analysis": None}
+            return {"response": message.content or "I could not produce a final answer.", "analysis": None}
 
         for tool_call in tool_calls:
             func_name = tool_call.function.name
             arguments = json.loads(tool_call.function.arguments or "{}")
             if func_name == "find_ponds" and normalized_municipality:
                 arguments["municipality"] = normalized_municipality
+            if func_name == "find_ponds":
+                arguments.setdefault("water_body_type", _extract_water_body_type(prompt))
             tool_result = _dispatch_tool(func_name, arguments)
             call_message = tool_call.model_dump()
             call_message["function"]["arguments"] = json.dumps(arguments, ensure_ascii=False)
@@ -563,12 +723,14 @@ def _call_featherless_tools(
         if text:
             return {"response": text, "analysis": None}
 
-    return {"response": "Agent nedokázal dokončit analýzu v daném počtu cyklů.", "analysis": None}
+    return {"response": "The agent could not complete the analysis within the allowed number of steps.", "analysis": None}
 
 
 def run_agent(prompt: str, state: dict[str, Any] | None = None) -> dict[str, Any]:
     if state is None:
         state = {}
+    if _requests_charts(prompt):
+        state["show_charts"] = True
     raw_municipality = _extract_municipality(prompt)
     municipality = raw_municipality or state.get("last_municipality")
     normalized_municipality = None
@@ -619,7 +781,7 @@ def run_agent(prompt: str, state: dict[str, Any] | None = None) -> dict[str, Any
         date_to = state.get("last_date_to")
 
     if not municipality:
-        return {"response": "Neslyšel jsem název obce. Uveďte prosím obec, např. „rybník v Řitce“.", "analysis": None, "status": "awaiting_input"}
+        return {"response": "I could not identify the municipality. Please specify a Czech municipality, for example 'a pond in Řitka'.", "analysis": None, "status": "awaiting_input"}
 
     state["last_municipality"] = municipality
     state["last_pond_name"] = pond_name
@@ -643,10 +805,12 @@ def run_agent(prompt: str, state: dict[str, Any] | None = None) -> dict[str, Any
                 if not date_from or not date_to:
                     state["pending_candidates"] = None
                     state["pending_ponds"] = None
-                    return {"response": "Vybral jsem rybník: " + selected["name"] + ". Uveďte prosím časové období, např. „od 2025-01-01 do 2025-12-31“.", "analysis": None, "selected_pond": selected, "status": "awaiting_input"}
+                    return {"response": "Selected: " + selected["name"] + ". Please specify a date range, for example '2025-01-01 to 2025-12-31'.", "analysis": None, "selected_pond": selected, "status": "awaiting_input"}
                 state["pending_candidates"] = None
                 state["pending_ponds"] = None
-                return _analyze_selected_pond(selected, date_from, date_to)
+                return _analyze_selected_pond(
+                    selected, date_from, date_to, bool(state.get("show_charts"))
+                )
 
     explicit_municipality = _extract_municipality(prompt)
     if (
@@ -656,9 +820,13 @@ def run_agent(prompt: str, state: dict[str, Any] | None = None) -> dict[str, Any
         and explicit_municipality is None
         and not state.get("pending_candidates")
     ):
-        return _analyze_selected_pond(state["selected_pond"], date_from, date_to)
+        return _analyze_selected_pond(
+            state["selected_pond"], date_from, date_to, bool(state.get("show_charts"))
+        )
 
-    pond_search = find_ponds(municipality, pond_name)
+    pond_search = find_ponds(
+        municipality, pond_name, _extract_water_body_type(prompt)
+    )
     if pond_search.get("status") == "multiple":
         state["pending_candidates"] = pond_search["candidates"]
         state["pending_ponds"] = pond_search.get("result", [])
@@ -668,8 +836,8 @@ def run_agent(prompt: str, state: dict[str, Any] | None = None) -> dict[str, Any
         )
         return {
             "response": (
-                f"Obec jsem převedl do základního tvaru „{pond_search.get('municipality', municipality)}“. "
-                "Našel jsem více rybníků. Vyberte prosím jednoho v mapě a seznamu níže: "
+                f"Using the municipality “{pond_search.get('municipality', municipality)}”. "
+                "I found multiple water bodies. Choose one on the map or from the list below: "
                 + choices
                 + "."
             ),
@@ -679,7 +847,7 @@ def run_agent(prompt: str, state: dict[str, Any] | None = None) -> dict[str, Any
         }
 
     if pond_search.get("status") in ("not_found", "error"):
-        return {"response": pond_search.get("message", "Rybník nebyl nalezen. Uveďte prosím upřesnění."), "analysis": None, "status": "not_found"}
+        return {"response": pond_search.get("message", "No water body was found. Please refine your request."), "analysis": None, "status": "not_found"}
 
     pond = pond_search["result"][0]
     state["selected_pond"] = pond
@@ -687,13 +855,15 @@ def run_agent(prompt: str, state: dict[str, Any] | None = None) -> dict[str, Any
         canonical_name = pond_search.get("municipality", municipality)
         return {
             "response": (
-                f"Obec jsem převedl do základního tvaru „{canonical_name}“. "
-                f"Nalezen rybník: {pond['name']}. Uveďte prosím časové období, "
-                "například „od 2025-01-01 do 2025-12-31“."
+                f"Using the municipality “{canonical_name}”. "
+                f"Found: {pond['name']}. Please specify a date range, "
+                "for example “2025-01-01 to 2025-12-31”."
             ),
             "analysis": None,
             "selected_pond": pond,
             "status": "awaiting_input",
         }
 
-    return _analyze_selected_pond(pond, date_from, date_to)
+    return _analyze_selected_pond(
+        pond, date_from, date_to, bool(state.get("show_charts"))
+    )
