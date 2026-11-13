@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.DS_Store
+api/featherless.txt
+api/copernicus.txt
+.cache/
+cache/
+*.log

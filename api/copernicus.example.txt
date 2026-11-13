@@ -1,0 +1,5 @@
+CDSE_CLIENT_ID=PASTE_YOUR_CLIENT_ID_HERE
+CDSE_CLIENT_SECRET=PASTE_YOUR_CLIENT_SECRET_HERE
+CDSE_TOKEN_URL=https://identity.dataspace.copernicus.eu/auth/realms/CDSE/protocol/openid-connect/token
+SENTINEL_HUB_BASE_URL=https://sh.dataspace.copernicus.eu
+WIC_COLLECTION_ID=a0596412-1e04-4530-9e3e-931cf4a3b52e
