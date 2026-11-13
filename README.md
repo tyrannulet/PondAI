@@ -98,3 +98,10 @@ Pokud nejsou nastavena skutečná API data, aplikace se spustí v demo režimu:
 ## Rozšíření projektu
 
 PondWatch AI je navržen tak, aby bylo snadné rozšířit o další analýzu biologické kvality vody, zalednění a zlepšené AI interpretace beze změny základní jednoduché architektury.
+## Spuštění aplikace ve Windows
+
+1. Dvakrát klikněte na `Spustit PondWatch.bat`.
+2. Při prvním spuštění skript nainstaluje chybějící závislosti z `requirements.txt`.
+3. Otevře se aplikace v prohlížeči na [http://localhost:8502](http://localhost:8502). Okno terminálu ponechte otevřené, dokud aplikaci používáte; zavřením ji ukončíte.
+
+Skript vyžaduje nainstalovaný Python 3 a spouští se ze složky projektu.

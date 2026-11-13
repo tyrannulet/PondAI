@@ -63,3 +63,14 @@ Záznam významných změn a důvodů jejich provedení. Při dalších úpravá
 - Opraven výpočet platných pixelů jako `sampleCount - noDataCount`, v souladu se strukturou odpovědi Statistical API; období bez platných pixelů už nevykazuje falešných 0 %.
 - Živé ověření Řiteckého rybníka za 2026-08-13 až 2026-11-13: geometrie pokrývá 89 pixelů místo 1; podíly jsou většinou průběžné hodnoty přibližně 20–38 %, jedno období 0 % a období bez dat je `n/a`.
 - Přidán regresní test převodu polygonu do metrického souřadnicového systému a odečítání pixelů v `noDataCount`.
+
+## 2026-11-13 — odborná interpretace satelitních grafů
+
+- Featherless dostává při dokončení analýzy geospaciální kontext rybníka, období, kvality a počtu pixelů i hodnoty časových řad vodního podílu, NDWI, NDTI a NDCI.
+- Systémový prompt vymezuje interpretaci jako orientační screening: mísení vody a břehu v 10m pixelech, vliv oblačnosti/stínů/vegetace/sezóny, rozdíl mezi průměrným NDWI a podílem klasifikovaných vodních pixelů a omezení NDTI/NDCI.
+- Model má na konci odpovědi projít každý graf, komentovat trend a chybějící data a nevyvozovat nepodložené příčiny, laboratorní kvalitu vody ani zalednění. Interpretace se zobrazuje v chatové odpovědi i pod grafy.
+- Pokud AI není nakonfigurována nebo její volání selže, zobrazí se automatické shrnutí číselných trendů místo prázdné sekce; dostupnost AI či její chybu sděluje UI.
+- Přidány testy ověřující, že model obdrží geospaciální omezení a měření a že záložní shrnutí projde všechny grafy včetně chybějících dat.
+- Živý test Qwen3 odhalil, že výchozí režim přemýšlení spotřeboval limit odpovědi a vracel useknutý text. Pro interpretaci je vypnut přes `chat_template_kwargs.enable_thinking=false`, limit odpovědi zvýšen a neúplný výstup se odmítne ve prospěch úplného datového shrnutí.
+- Upřesněno rozlišení mezi 0 % při kladném počtu validních pixelů a chybějícími daty; model nesmí vysvětlovat konkrétní trendy nepodloženými příčinami.
+- Do kontextu modelu jsou přidány předpočítané přesné rozsahy a směry. Neúplný nebo spekulativní výstup se nahrazuje datovým shrnutím všech grafů. Živý test Qwen3 vrátil čtyři dokončené části pro vodní podíl, NDWI, NDTI a NDCI.

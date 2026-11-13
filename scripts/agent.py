@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import calendar
+import unicodedata
 from datetime import date
 from typing import Any
 
@@ -169,6 +171,226 @@ def _ndci_summary(algae: dict[str, Any]) -> str:
     return str(first) if first is not None else "n/a"
 
 
+def _series_values(timeseries: list[dict[str, Any]], metric: str) -> list[tuple[str, float]]:
+    values: list[tuple[str, float]] = []
+    for item in timeseries:
+        value = item.get(metric)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        if math.isfinite(value):
+            values.append((str(item.get("date") or "neznámé datum"), float(value)))
+    return values
+
+
+def _summarize_chart(metric: str, label: str, timeseries: list[dict[str, Any]]) -> str:
+    values = _series_values(timeseries, metric)
+    if not values:
+        return (
+            f"{label}: za toto období nejsou platné hodnoty k interpretaci "
+            f"({len(timeseries)} intervalů bez hodnot)."
+        )
+    start_date, start_value = values[0]
+    end_date, end_value = values[-1]
+    minimum = min(value for _, value in values)
+    maximum = max(value for _, value in values)
+    if len(values) == 1:
+        trend = f"Jediná platná hodnota je {start_value:g} ({start_date})"
+    else:
+        change = end_value - start_value
+        direction = "vzrostla" if change > 0 else "klesla" if change < 0 else "zůstala přibližně stejná"
+        trend = (
+            f"mezi {start_date} a {end_date} {direction} "
+            f"z {start_value:g} na {end_value:g}"
+        )
+    summary = (
+        f"{label}: {trend}; rozsah pozorovaných hodnot je "
+        f"{minimum:g} až {maximum:g}."
+    )
+    missing_count = len(timeseries) - len(values)
+    if missing_count:
+        summary += f" Bez platné hodnoty je {missing_count} z {len(timeseries)} intervalů."
+    return summary
+
+
+def _fallback_chart_interpretation(
+    analysis: dict[str, Any], algae: dict[str, Any]
+) -> str:
+    timeseries = analysis.get("timeseries") or []
+    algae_timeseries = algae.get("ndci_trend") or timeseries
+    summaries = [
+        _summarize_chart("water_percent", "Podíl vodních pixelů", timeseries)
+        + " Jde o podíl klasifikovaných pixelů uvnitř polygonu, ne o hladinu či objem vody.",
+        _summarize_chart("ndwi", "NDWI", timeseries)
+        + " Je to průměrný spektrální indikátor vody, ne procento vodní plochy.",
+        _summarize_chart("ndti", "NDTI", timeseries)
+        + " Je to optický proxy suspendovaných částic, ne laboratorní měření zákalu.",
+        _summarize_chart("ndci", "NDCI", algae_timeseries)
+        + " Je to orientační proxy chlorofylu/fytoplanktonu, ne jeho přímé měření.",
+    ]
+    return (
+        "\n".join(f"- {summary}" for summary in summaries)
+        + "\nOmezení: Sentinel-2 pixely o velikosti 10 m mohou zahrnovat současně "
+        "vodu i břeh; indexy nejsou laboratorní rozbor."
+    )
+
+
+def _interpret_analysis_charts(
+    pond: dict[str, Any], analysis: dict[str, Any], algae: dict[str, Any]
+) -> str:
+    fallback = _fallback_chart_interpretation(analysis, algae)
+    if not has_real_featherless() or OpenAI is None:
+        return (
+            "Automatické shrnutí grafů (AI interpretace není nakonfigurována):\n"
+            + fallback
+        )
+
+    config = get_featherless_config()
+    chart_data = {
+        "pond": {
+            "name": pond.get("name"),
+            "municipality": pond.get("municipality"),
+            "polygon_area_m2": pond.get("area_m2"),
+        },
+        "period": {
+            "from": analysis.get("date_from"),
+            "to": analysis.get("date_to"),
+            "aggregation": "desetidenní časové intervaly",
+        },
+        "data_quality": analysis.get("quality_summary"),
+        "precalculated_trends": {
+            "water_percent": _summarize_chart(
+                "water_percent", "Podíl vodních pixelů", analysis.get("timeseries") or []
+            ),
+            "ndwi": _summarize_chart("ndwi", "NDWI", analysis.get("timeseries") or []),
+            "ndti": _summarize_chart("ndti", "NDTI", analysis.get("timeseries") or []),
+            "ndci": _summarize_chart(
+                "ndci",
+                "NDCI",
+                algae.get("ndci_trend") or analysis.get("timeseries") or [],
+            ),
+        },
+        "water_area_estimate": {
+            "definition": (
+                "Procento platných pixelů uvnitř rybničního polygonu, jejichž NDWI "
+                "překročilo práh 0; nejde o výšku hladiny ani objem vody."
+            ),
+            "observations": [
+                {
+                    "date": item.get("date"),
+                    "percent": item.get("water_percent"),
+                    "valid_pixels": item.get("valid_pixels"),
+                }
+                for item in analysis.get("timeseries", [])
+            ],
+        },
+        "optical_indices": {
+            "definition": (
+                "NDWI = (zelené - NIR)/(zelené + NIR), orientační spektrální "
+                "indikátor vody. NDTI = (červené - zelené)/(červené + zelené), "
+                "optický proxy suspendovaných látek, ne laboratorní zákal. "
+                "NDCI = (red-edge - červené)/(red-edge + červené), screening "
+                "chlorofylu/fytoplanktonu, ne potvrzení sinic ani toxinů."
+            ),
+            "observations": [
+                {
+                    "date": item.get("date"),
+                    "ndwi": item.get("ndwi"),
+                    "ndti": item.get("ndti"),
+                    "ndci": (algae.get("ndci_trend") or analysis.get("timeseries", []))[index].get("ndci")
+                    if index < len(algae.get("ndci_trend") or analysis.get("timeseries", []))
+                    else None,
+                    "valid_pixels": item.get("valid_pixels"),
+                }
+                for index, item in enumerate(analysis.get("timeseries", []))
+            ],
+        },
+        "algae_screening": {
+            "category": algae.get("category"),
+            "interpretation": algae.get("interpretation"),
+        },
+    }
+    system_prompt = (
+        "Jsi expert na geoinformatiku a dálkový průzkum Země. Interpretuj pouze "
+        "dodaná měření. Odpověz česky přesně čtyřmi částmi a těmito nadpisy: "
+        "„Podíl vodních pixelů“, „NDWI“, „NDTI“, „NDCI“. Použij předpočítané trendy "
+        "jako zdroj pravdy pro rozsah a směr. V každé části maximálně dvěma krátkými "
+        "větami popiš trend a chybějící data; odpověď dokonči. Hodnoty null zcela "
+        "vynech z rozsahu a nikdy je nepřiřazuj konkrétní odchylce. Neuváděj příčiny, "
+        "hypotézy ani spekulativní výrazy jako "
+        "„může naznačovat“. Podíl vody je procento pixelů s NDWI > 0 uvnitř pevného "
+        "polygonu, ne změna rozlohy, hladina ani objem. Nulový podíl při kladném "
+        "počtu validních pixelů je skutečný výsledek klasifikace, ne chybějící hodnota. "
+        "NDWI je průměrný spektrální index, nikoli podíl pixelů; 10m pixely mohou "
+        "míchat vodu a břeh. NDTI je optický proxy suspendovaných částic, ne laboratorní "
+        "zákal. NDCI je orientační proxy chlorofylu/fytoplanktonu, ne jeho přímé "
+        "měření ani potvrzení sinic/toxinů. Hodnoty označené null nebo s 0 validními "
+        "pixely jsou nedostupné. Uváděj počty pixelů přesně podle dat a neoznačuj "
+        "je za nízké bez podkladu. Netvrď laboratorní kvalitu vody ani zamrznutí."
+    )
+    try:
+        client = OpenAI(
+            base_url=config.get("FEATHERLESS_BASE_URL", "https://api.featherless.ai/v1"),
+            api_key=config["FEATHERLESS_API_KEY"],
+            timeout=45,
+        )
+        response = client.chat.completions.create(
+            model=config.get("FEATHERLESS_MODEL", "Qwen/Qwen3-32B"),
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": json.dumps(chart_data, ensure_ascii=False),
+                },
+            ],
+            temperature=0.2,
+            max_tokens=1200,
+            extra_body={"chat_template_kwargs": {"enable_thinking": False}},
+        )
+        choice = response.choices[0]
+        content = choice.message.content
+        if getattr(choice, "finish_reason", None) == "length":
+            raise ValueError("AI interpretace byla useknuta limitem tokenů.")
+        if isinstance(content, str) and content.strip():
+            interpretation = content.strip()
+            normalized = "".join(
+                character
+                for character in unicodedata.normalize("NFKD", interpretation.casefold())
+                if not unicodedata.combining(character)
+            )
+            speculative_phrases = (
+                "muze ",
+                "mohou ",
+                "naznac",
+                "pravdepodob",
+                "sezon",
+                "znecisten",
+                "vlivem",
+            )
+            if any(phrase in normalized for phrase in speculative_phrases):
+                raise ValueError("AI uvedla nepodložené příčiny trendů.")
+            if all(label in normalized for label in ("ndwi", "ndti", "ndci")) and (
+                "vodnich pixel" in normalized or "podil vody" in normalized
+            ):
+                return interpretation
+            raise ValueError("AI neinterpretovala všechny čtyři grafy.")
+        raise ValueError("Featherless vrátil prázdnou interpretaci grafů.")
+    except (OpenAIError, ValueError, TypeError, IndexError) as exc:
+        LOGGER.warning(
+            "Featherless chart interpretation failed (%s); using data summary.",
+            type(exc).__name__,
+        )
+        reason = (
+            "AI nevrátila úplnou nebo dostatečně opatrnou interpretaci grafů"
+            if isinstance(exc, ValueError)
+            else f"AI interpretace nebyla dostupná ({type(exc).__name__})"
+        )
+        return (
+            f"{reason}; "
+            "následuje automatické shrnutí naměřených trendů:\n"
+            + fallback
+        )
+
+
 def _describe_candidate(candidate: dict[str, Any], index: int) -> str:
     number = candidate.get("number", index + 1)
     name = candidate.get("name") or "Bezejmenný rybník"
@@ -191,6 +413,7 @@ def _analyze_selected_pond(
     analysis = analyze_pond(pond["pond_id"], date_from, date_to)
     algae = analyze_algae_bloom(pond["pond_id"], date_from, date_to)
     metrics = analysis.get("metrics", {})
+    chart_interpretation = _interpret_analysis_charts(pond, analysis, algae)
     response = (
         f"Vyhodnocení rybníka {pond['name']} ({pond.get('area_m2', 'neznámá')} m²) "
         f"pro období {date_from} až {date_to}.\n"
@@ -200,11 +423,17 @@ def _analyze_selected_pond(
         f"Průměrný NDCI: {_ndci_summary(algae)}\n"
         f"{algae.get('interpretation', '')}\n"
         "Podíl vodních pixelů je odhad vodní plochy v polygonu, ne měření výšky hladiny "
-        "ani objemu vody. Zalednění WIC zatím aplikace nedokáže ověřit."
+        "ani objemu vody. Zalednění WIC zatím aplikace nedokáže ověřit.\n\n"
+        "Interpretace grafů:\n"
+        f"{chart_interpretation}"
     )
     return {
         "response": response,
-        "analysis": {**analysis, "algae": algae},
+        "analysis": {
+            **analysis,
+            "algae": algae,
+            "graph_interpretation": chart_interpretation,
+        },
         "selected_pond": pond,
         "status": "completed",
     }
@@ -259,8 +488,15 @@ def _call_featherless_tools(
         "Jsi asistent pro PondWatch AI. Rozumíš českým dotazům o rybnících, jejich "
         "přezdívkám i skloňovaným názvům obcí. Před vyhledáním obce použij její základní "
         "tvar. Proveď pouze lokální nástroje find_ponds a analyze_pond. Odpovídej česky. "
-        "Podíl vodních pixelů neprezentuj jako výšku hladiny nebo objem vody. Pokud WIC "
-        "data nejsou ve výsledku, netvrď, zda rybník zamrzl."
+        "Jsi také odborník na geoinformatiku a dálkový průzkum Země. NDWI je spektrální "
+        "indikátor vody; podíl vody je klasifikace pixelů uvnitř polygonu, ne hladina "
+        "ani objem. Sentinel-2 pixel 10 m může míchat vodu a břeh; výsledek ovlivňují "
+        "oblačnost, stíny, vegetace, zákal, sezóna a počet platných pixelů. NDTI je "
+        "pouze optický proxy suspendovaných látek, NDCI orientační screening "
+        "chlorofylu/fytoplanktonu; žádný z indexů není laboratorní měření. Po analýze "
+        "vždy na konci interpretuj každý zobrazený graf, trend i chybějící data, "
+        "zohledni spolehlivost a nevyvozuj nepodložené příčiny. Pokud WIC data nejsou "
+        "ve výsledku, netvrď, zda rybník zamrzl."
     )
     if normalized_municipality:
         system_prompt += (

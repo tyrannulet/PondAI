@@ -8,7 +8,7 @@ import streamlit as st
 from streamlit_folium import st_folium
 
 from scripts import demo_data
-from scripts.agent import run_agent
+from scripts.agent import _fallback_chart_interpretation, run_agent
 from scripts.config import APP_SUBTITLE, APP_TITLE, get_api_status, has_real_copernicus, has_real_featherless
 
 
@@ -255,6 +255,15 @@ def main() -> None:
         st.subheader("Zalednění")
         st.info("Analýza zalednění WIC zatím není implementována; aplikace nemůže ověřit, zda byl rybník zamrzlý.")
         _render_algae_panel(analysis)
+        st.subheader("Interpretace grafů")
+        st.markdown(
+            analysis.get(
+                "graph_interpretation",
+                _fallback_chart_interpretation(
+                    analysis, analysis.get("algae", {})
+                ),
+            )
+        )
         st.subheader("Tabulka naměřených hodnot")
         st.dataframe(df[["date", "ndwi", "ndti", "water_percent", "valid_pixels"]], use_container_width=True)
     else:
