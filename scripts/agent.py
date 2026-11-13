@@ -734,6 +734,23 @@ def run_agent(prompt: str, state: dict[str, Any] | None = None) -> dict[str, Any
     intent = None if exact_choice else understand_request(prompt, state)
     model_understood = intent is not None
     intent = intent or _local_intent(prompt, state)
+    # A model can find the right municipality but omit a literal period. Preserve
+    # unambiguous ranges before presenting candidates so confirmation can analyze.
+    if intent["action"] in ("search", "analyze", "select") and not (
+        intent.get("date_from") or intent.get("date_to")
+    ):
+        explicit_range = re.search(
+            r"\b20\d{2}\s*(?:to|through|until|[-–—]|až|az|do)\s*20\d{2}\b",
+            prompt, re.IGNORECASE,
+        ) or len(re.findall(r"\b\d{4}-\d{2}-\d{2}\b", prompt)) >= 2
+        if explicit_range:
+            date_from, date_to = _extract_date_range(prompt)
+            try:
+                validate_date_range(date_from, date_to)
+            except (ValueError, TypeError):
+                intent = {"action": "clarify", "clarification": "Please provide valid dates, with the start before the end (YYYY-MM-DD)."}
+            else:
+                intent = {**intent, "date_from": date_from, "date_to": date_to}
     if intent["action"] in ("search", "analyze"):
         state["analysis_request"] = prompt
     try:

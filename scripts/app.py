@@ -747,6 +747,8 @@ def main() -> None:
                 st.write(f"- Data availability: {quality.get('data_quality', 'unknown')}")
                 st.write(f"- Limitations: {quality.get('limitations', 'No specific limitations reported.')}")
                 st.write(f"- AI/data note: {analysis.get('warning', 'No additional notes.')}")
+        elif selected_pond:
+            st.info(f"Selected: {selected_pond.get('name', 'Water body')}. No completed analysis is available yet; see the response above.")
         else:
             st.info("Enter a request here. Results appear after selecting a water body and completing the satellite analysis.")
 

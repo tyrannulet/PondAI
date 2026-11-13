@@ -15,6 +15,44 @@ MULTIPOLYGON = {"type": "MultiPolygon", "coordinates": [
 
 
 class ChatInterfaceTests(unittest.TestCase):
+    def test_prague_search_with_245_candidates_confirms_the_latest_dropdown_value(self):
+        ponds = [
+            {"pond_id": f"prague-{index}", "name": f"Prague pond {index}", "municipality": "Praha"}
+            for index in range(1, 246)
+        ]
+        candidates = [{"number": i + 1, **pond} for i, pond in enumerate(ponds)]
+        with (
+            patch.object(config, "has_real_copernicus", return_value=True),
+            patch.object(agent, "understand_request", return_value={
+                "action": "search", "municipality": "Praha",
+            }) as understand,
+            patch.object(agent, "find_ponds", return_value={
+                "status": "multiple", "result": ponds, "candidates": candidates,
+            }) as search,
+            patch.object(agent, "compose_reply", return_value=None),
+            patch.object(agent, "_analyze_selected_pond", return_value={
+                "status": "completed", "analysis": {"pond_id": "prague-245", "report": "Prague analysis"},
+                "selected_pond": ponds[-1], "response": "Prague analysis",
+            }) as analyze,
+        ):
+            app = AppTest.from_file(APP_PATH, default_timeout=15).run()
+            app.chat_input[0].set_value("please analyze pond in prague in 2020 to 2026").run()
+            self.assertEqual(len(app.exception), 0)
+            self.assertEqual(len(app.selectbox(key="pond_candidate_selection").options), 245)
+            app.selectbox(key="pond_candidate_selection").select(16).run()
+            app.selectbox(key="pond_candidate_selection").select(244).run()
+            app.button(key="select_pond_candidate").click().run()
+            self.assertEqual(len(app.exception), 0)
+            self.assertEqual(app.session_state["selected_pond"]["pond_id"], "prague-245")
+            self.assertEqual(app.session_state["analysis"]["report"], "Prague analysis")
+            self.assertEqual(len(app.selectbox), 0)
+            self.assertTrue(any("Selected: 245." in item.value for item in app.markdown))
+            # An unrelated rerun must never execute the queued selection again.
+            app.run()
+        analyze.assert_called_once_with(ponds[-1], "2020-01-01", "2026-12-31", False)
+        self.assertEqual(search.call_count, 1)
+        self.assertEqual(understand.call_count, 1)
+
     def test_visualizations_can_be_hidden_without_losing_the_report_or_analysis(self):
         with (
             patch.object(config, "has_real_copernicus", return_value=False),
