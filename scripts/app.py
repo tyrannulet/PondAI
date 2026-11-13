@@ -19,9 +19,17 @@ def _default_analysis() -> dict[str, Any]:
 
 def _ensure_session() -> None:
     st.session_state.setdefault("messages", [])
-    st.session_state.setdefault("analysis", _default_analysis())
-    st.session_state.setdefault("selected_pond", {"pond_id": "ritka-pond-1", "name": "Rybník v Řitce", "municipality": "Řítek", "area_m2": 142500})
+    st.session_state.setdefault("analysis", None if has_real_copernicus() else _default_analysis())
+    st.session_state.setdefault(
+        "selected_pond",
+        None
+        if has_real_copernicus()
+        else {"pond_id": "ritka-pond-1", "name": "Rybník v Řitce", "municipality": "Řítek", "area_m2": 142500},
+    )
     st.session_state.setdefault("pending_candidates", None)
+    if has_real_copernicus() and (st.session_state.get("analysis") or {}).get("demo_mode"):
+        st.session_state["analysis"] = None
+        st.session_state["selected_pond"] = None
 
 
 def _render_map(geometry: dict[str, Any] | None, pond_name: str) -> None:
@@ -75,9 +83,10 @@ def main() -> None:
     st.caption(APP_SUBTITLE)
 
     api_status = get_api_status()
-    demo_mode = not (has_real_featherless() or has_real_copernicus())
-    if demo_mode:
+    if not has_real_copernicus():
         st.warning("DEMO REŽIM – zobrazená data jsou simulovaná, nejde o skutečnou satelitní analýzu.")
+    elif not has_real_featherless():
+        st.info("Satelitní data lze načíst, ale Featherless AI není nastaven. Pokračovat můžete běžným českým promptem.")
     else:
         st.success("Aplikace má aktivní připojení k API. Přesné satelitní údaje budou načteny podle konfigurace.")
 
@@ -85,7 +94,7 @@ def main() -> None:
         st.header("Stav API")
         st.write("Featherless:", api_status["featherless"]["ready"])
         st.write("Copernicus:", api_status["copernicus"]["ready"])
-        if demo_mode:
+        if not has_real_copernicus():
             st.info("Přidejte API klíče do souborů api/featherless.txt a api/copernicus.txt a restartujte aplikaci.")
 
     if "messages" in st.session_state and st.session_state["messages"]:
@@ -98,20 +107,29 @@ def main() -> None:
         with st.chat_message("user"):
             st.markdown(prompt)
 
-        result = run_agent(prompt, st.session_state)
+        with st.spinner("Přemýšlím a připravuji analýzu…"):
+            result = run_agent(prompt, st.session_state)
         st.session_state["analysis"] = result.get("analysis") or st.session_state["analysis"]
         st.session_state["selected_pond"] = result.get("selected_pond") or st.session_state["selected_pond"]
         st.session_state["messages"].append({"role": "assistant", "content": result["response"]})
         with st.chat_message("assistant"):
             st.markdown(result["response"])
 
-    analysis = st.session_state.get("analysis") or _default_analysis()
-    selected_pond = st.session_state.get("selected_pond") or {"name": "Rybník v Řitce", "pond_id": "ritka-pond-1"}
+    analysis = st.session_state.get("analysis")
+    selected_pond = st.session_state.get("selected_pond")
+    if not analysis or not selected_pond:
+        st.info("Zadejte požadavek do chatu výše. Skutečné výsledky se zobrazí po výběru rybníka a dokončení satelitní analýzy.")
+        return
 
     st.subheader(f"Vybraný rybník: {selected_pond.get('name', 'Neznámý rybník')}")
     col_map, col_meta = st.columns([2, 1])
     with col_map:
-        _render_map(analysis.get("geometry") or demo_data.DEMO_PONDS.get(selected_pond.get("pond_id"), {}).get("geometry"), selected_pond.get("name", "Rybník"))
+        _render_map(
+            analysis.get("geometry")
+            or selected_pond.get("geometry")
+            or demo_data.DEMO_PONDS.get(selected_pond.get("pond_id"), {}).get("geometry"),
+            selected_pond.get("name", "Rybník"),
+        )
     with col_meta:
         st.write(f"ID: {selected_pond.get('pond_id', 'neznámé')}")
         st.write(f"Obec: {selected_pond.get('municipality', 'neznámá')}")
@@ -128,7 +146,7 @@ def main() -> None:
         _render_line_chart(df, "ndwi", "Vývoj NDWI", "#17becf")
         _render_line_chart(df, "ndti", "Vývoj NDTI", "#ff7f0e")
         st.subheader("Zalednění")
-        st.info("Velikost zalednění není k dispozici v demo režimu. V reálném režimu zde bude graf a podíl ledu.")
+        st.info("Analýza zalednění WIC zatím není implementována; aplikace nemůže ověřit, zda byl rybník zamrzlý.")
         _render_algae_panel(analysis)
         st.subheader("Tabulka naměřených hodnot")
         st.dataframe(df[["date", "ndwi", "ndti", "water_percent", "valid_pixels"]], use_container_width=True)

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
-import json
+from datetime import datetime
 import time
 from typing import Any
 
@@ -48,23 +47,30 @@ def _get_copernicus_token() -> str:
 
 def _sentinel_hub_statistics(geometry: dict[str, Any], date_from: str, date_to: str, evalscript: str) -> dict[str, Any]:
     token = _get_copernicus_token()
+    start = _as_utc_datetime(date_from, end_of_day=False)
+    end = _as_utc_datetime(date_to, end_of_day=True)
     payload = {
         "input": {
             "bounds": {
-                "geometry": {
-                    **geometry,
-                    "crs": {"type": "name", "properties": {"name": "EPSG:5514"}},
-                }
+                "geometry": geometry,
+                "properties": {"crs": "http://www.opengis.net/def/crs/EPSG/0/4326"},
             },
-            "data": [{"type": "sentinel-2-l2a", "dataFilter": {"timeRange": {"from": date_from, "to": date_to}, "mosaickingOrder": "leastCC"}}],
+            "data": [{"type": "sentinel-2-l2a", "dataFilter": {"mosaickingOrder": "leastCC"}}],
         },
         "aggregation": {
-            "timeRange": {"from": date_from, "to": date_to},
-            "aggregationPeriod": {"unit": "P10D", "value": 10},
-            "resx": 10,
-            "resy": 10,
+            "timeRange": {"from": start, "to": end},
+            "aggregationInterval": {"of": "P10D"},
+            "evalscript": evalscript,
+            "resx": 20,
+            "resy": 20,
         },
-        "evalscript": evalscript,
+        "calculations": {
+            "default": {
+                "statistics": {
+                    "default": {"percentiles": {"k": [50]}},
+                }
+            }
+        },
     }
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     response = requests.post(SENTINEL_HUB_URL, json=payload, headers=headers, timeout=60)
@@ -73,6 +79,15 @@ def _sentinel_hub_statistics(geometry: dict[str, Any], date_from: str, date_to: 
         return response.json()
     except ValueError:
         return {"error": "Neplatná odpověď Sentinel Hub API"}
+
+
+def _as_utc_datetime(value: str, end_of_day: bool) -> str:
+    date_value = value.strip()
+    if "T" not in date_value:
+        date_value += "T23:59:59Z" if end_of_day else "T00:00:00Z"
+    elif date_value.endswith("+00:00"):
+        date_value = date_value[:-6] + "Z"
+    return date_value
 
 
 def _extract_metric_value(payload: dict[str, Any], metric_name: str) -> float | None:
@@ -104,25 +119,28 @@ def _extract_time_series(payload: dict[str, Any]) -> list[dict[str, Any]]:
     series: list[dict[str, Any]] = []
     for item in data:
         interval = item.get("interval") if isinstance(item, dict) else None
-        result = item.get("output") if isinstance(item, dict) else None
-        if not isinstance(result, dict):
+        outputs = item.get("outputs") if isinstance(item, dict) else None
+        indices = outputs.get("indices") if isinstance(outputs, dict) else None
+        bands = indices.get("bands") if isinstance(indices, dict) else None
+        if not isinstance(bands, dict):
             continue
         date_from_value = interval.get("from") if isinstance(interval, dict) else None
         date_to_value = interval.get("to") if isinstance(interval, dict) else None
-        ndwi = _extract_metric_value(result, "NDWI")
-        ndti = _extract_metric_value(result, "NDTI")
-        ndci = _extract_metric_value(result, "NDCI")
-        water_share = _extract_metric_value(result, "waterShare")
-        valid_pixels = _extract_metric_value(result, "validPixels")
+        band_stats = [((bands.get(f"B{index}") or {}).get("stats") or {}) for index in range(4)]
+        means = [stat.get("mean") for stat in band_stats]
+        ndwi, ndti, ndci, water_share = means
+        valid_pixels = band_stats[0].get("sampleCount")
+        ndci_median = (band_stats[2].get("percentiles") or {}).get("50.0")
         series.append(
             {
                 "date": str(date_from_value or date_to_value or "").split("T")[0],
                 "ndwi": round(ndwi, 3) if ndwi is not None else None,
                 "ndti": round(ndti, 3) if ndti is not None else None,
                 "ndci": round(ndci, 3) if ndci is not None else None,
-                "water_percent": round(water_share, 2) if water_share is not None else None,
+                "ndci_median": round(ndci_median, 3) if ndci_median is not None else None,
+                "water_percent": round(water_share * 100, 2) if water_share is not None else None,
                 "valid_pixels": int(valid_pixels) if valid_pixels is not None else None,
-                "quality": "zjištěno" if valid_pixels is not None else "neznámá",
+                "quality": "nízká spolehlivost" if valid_pixels is not None and valid_pixels < 10 else "zjištěno",
             }
         )
     return series
@@ -134,23 +152,24 @@ def _sentinel2_evalscript() -> str:
     function setup() {
       return {
         input: [{bands: ["B03", "B04", "B08", "B05", "SCL", "dataMask"]}],
-        output: {bands: 6
-      }
+        output: [
+          {id: "indices", bands: 4, sampleType: "FLOAT32"},
+          {id: "dataMask", bands: 1}
+        ]
       };
     }
     function evaluatePixel(samples) {
-      let ndwi = (samples.B03 - samples.B08) / (samples.B03 + samples.B08);
-      let ndti = (samples.B04 - samples.B03) / (samples.B04 + samples.B03);
-      let ndci = (samples.B05 - samples.B04) / (samples.B05 + samples.B04);
-      let valid = samples.dataMask && samples.SCL !== 3 && samples.SCL !== 8 && samples.SCL !== 9 && samples.SCL !== 10 && samples.SCL !== 11;
-      return [
-        valid ? ndwi : 0,
-        valid ? ndti : 0,
-        valid ? ndci : 0,
-        samples.B03,
-        samples.B04,
-        valid ? 1 : 0,
-      ];
+      let ndwiSum = samples.B03 + samples.B08;
+      let ndtiSum = samples.B04 + samples.B03;
+      let ndciSum = samples.B05 + samples.B04;
+      let valid = samples.dataMask === 1 && samples.SCL !== 3 && samples.SCL !== 8 && samples.SCL !== 9 && samples.SCL !== 10 && samples.SCL !== 11;
+      let ndwi = ndwiSum !== 0 ? (samples.B03 - samples.B08) / ndwiSum : 0;
+      let ndti = ndtiSum !== 0 ? (samples.B04 - samples.B03) / ndtiSum : 0;
+      let ndci = ndciSum !== 0 ? (samples.B05 - samples.B04) / ndciSum : 0;
+      return {
+        indices: [ndwi, ndti, ndci, ndwi > 0 ? 1 : 0],
+        dataMask: [valid && ndwiSum !== 0 && ndtiSum !== 0 && ndciSum !== 0 ? 1 : 0]
+      };
     }
     """
 
@@ -183,10 +202,12 @@ def analyze_pond(pond_id: str, date_from: str, date_to: str) -> dict[str, Any]:
         "average_ndci": round(sum(item["ndci"] for item in timeseries if item.get("ndci") is not None) / max(1, len([item for item in timeseries if item.get("ndci") is not None])), 3) if timeseries else None,
         "water_area_estimate_m2": None,
     }
+    valid_pixel_count = sum(item["valid_pixels"] for item in timeseries if item.get("valid_pixels") is not None) if timeseries else 0
+    low_confidence = valid_pixel_count < 10
     quality = {
-        "data_quality": "částečně dostupná" if timeseries else "nedostupná",
-        "valid_pixels": sum(item["valid_pixels"] for item in timeseries if item.get("valid_pixels") is not None) if timeseries else 0,
-        "reliability": "střední" if timeseries else "nízká",
+        "data_quality": "nedostatečný počet validních pixelů" if low_confidence and timeseries else "částečně dostupná" if timeseries else "nedostupná",
+        "valid_pixels": valid_pixel_count,
+        "reliability": "nízká" if low_confidence else "střední",
         "limitations": "Nedostatečné pokrytí nebo nízká validita dat může ovlivnit spolehlivost odhadu.",
     }
     return {
@@ -220,6 +241,15 @@ def analyze_algae_bloom(pond_id: str, date_from: str, date_to: str) -> dict[str,
         }
 
     ndci_values = [item["ndci"] for item in analysis.get("timeseries", []) if item.get("ndci") is not None]
+    if analysis.get("quality_summary", {}).get("valid_pixels", 0) < 10:
+        return {
+            "status": "not_available",
+            "source": "Sentinel-2 NDCI",
+            "ndci_trend": analysis.get("timeseries", []),
+            "category": "Nedostatek dat",
+            "interpretation": "Počet platných pixelů je příliš nízký pro spolehlivou indikaci algální biomasy.",
+            "quality": analysis.get("quality_summary", {}),
+        }
     mean_ndci = sum(ndci_values) / max(len(ndci_values), 1)
     if mean_ndci > 0.24:
         category = "Možný signál vodního květu"

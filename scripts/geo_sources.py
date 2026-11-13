@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import re
 from typing import Any
 
 import requests
@@ -14,7 +13,7 @@ REQUEST_TIMEOUT = 25
 
 
 def _call_arcgis(url: str, params: dict[str, Any]) -> dict[str, Any]:
-    response = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
+    response = requests.post(url, data=params, timeout=REQUEST_TIMEOUT)
     response.raise_for_status()
     payload = response.json()
     if isinstance(payload, dict) and "error" in payload:
@@ -44,14 +43,16 @@ def _normalise_geometry(geometry: dict[str, Any] | None) -> dict[str, Any] | Non
     if geometry.get("rings"):
         return {
             "type": "Polygon",
-            "coordinates": [geometry["rings"]],
+            "coordinates": geometry["rings"],
         }
     return geometry
 
 
 def _normalise_pond_result(feature: dict[str, Any]) -> dict[str, Any]:
     attrs = feature.get("attributes") or {}
-    area = attrs.get("ploscha")
+    area = attrs.get("Shape_Area")
+    if area is None:
+        area = attrs.get("ploscha")
     if area is None:
         area = attrs.get("area")
     if area is None:
@@ -81,46 +82,10 @@ def _normalise_pond_result(feature: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _fallback_demo_candidates(municipality: str, pond_name: str | None = None) -> dict[str, Any]:
-    matches = demo_data.get_demo_ponds_for_municipality(municipality)
-    if pond_name:
-        matches = [item for item in matches if pond_name.lower() in item["name"].lower() or pond_name.lower() in item["municipality"].lower()]
-    if not matches:
-        return {
-            "status": "not_found",
-            "municipality": municipality,
-            "message": f"V obci '{municipality}' nebyl nalezen žádný rybník. Uveďte prosím přesnější název obce nebo název rybníka.",
-            "candidates": [],
-        }
-    candidates = [
-        {
-            "number": index + 1,
-            "pond_id": item["pond_id"],
-            "name": item["name"],
-            "area_m2": item["area_m2"],
-        }
-        for index, item in enumerate(matches)
-    ]
-    return {
-        "status": "multiple" if len(candidates) > 1 else "ok",
-        "municipality": municipality,
-        "result": [
-            {
-                "pond_id": item["pond_id"],
-                "name": item["name"],
-                "area_m2": item["area_m2"],
-                "geometry": item["geometry"],
-            }
-            for item in matches
-        ],
-        "candidates": candidates,
-    }
-
-
 def _select_municipality_in_response(features: list[dict[str, Any]], target: str) -> dict[str, Any] | None:
     lowered = target.lower().strip()
     if not lowered:
-        return features[0] if features else None
+        return None
     for feature in features:
         attrs = feature.get("attributes") or {}
         name = str(attrs.get("nazev") or "").lower()
@@ -136,24 +101,34 @@ def find_ponds(municipality: str, pond_name: str | None = None) -> dict[str, Any
         return {"status": "not_found", "message": "Chybí název obce. Uveďte prosím obec, ve které chcete hledat rybník."}
 
     try:
-        ruians = _call_arcgis(
-            RUIAN_URL,
-            {
-                "where": "1=1",
-                "text": municipality,
-                "outFields": "nazev",
-                "returnGeometry": "true",
-                "outSR": 5514,
-                "f": "json",
-            },
-        )
-        features = ruians.get("features") or []
-        if not features:
-            raise ValueError("No municipality found")
-        community = _select_municipality_in_response(features, municipality)
+        name_variants = [municipality]
+        if municipality.casefold().endswith("ce"):
+            name_variants.append(municipality[:-2] + "ka")
+        community = None
+        for variant in name_variants:
+            escaped_name = variant.replace("'", "''")
+            ruians = _call_arcgis(
+                RUIAN_URL,
+                {
+                    "where": f"nazev = '{escaped_name}'",
+                    "outFields": "nazev",
+                    "returnGeometry": "true",
+                    "outSR": 5514,
+                    "f": "json",
+                },
+            )
+            community = _select_municipality_in_response(ruians.get("features") or [], variant)
+            if community is not None:
+                break
         if community is None:
-            raise ValueError("Municipality not found")
-        community_geometry = _normalise_geometry(community.get("geometry"))
+            return {
+                "status": "not_found",
+                "municipality": municipality,
+                "message": f"Obec '{municipality}' nebyla nalezena v RÚIAN. Zkontrolujte prosím její název.",
+                "candidates": [],
+            }
+        municipality = str((community.get("attributes") or {}).get("nazev") or municipality)
+        community_geometry = community.get("geometry")
         if community_geometry is None:
             raise ValueError("Municipality geometry not available")
 
@@ -163,7 +138,8 @@ def find_ponds(municipality: str, pond_name: str | None = None) -> dict[str, Any
             "geometryType": "esriGeometryPolygon",
             "spatialRel": "esriSpatialRelIntersects",
             "inSR": 5514,
-            "outSR": 5514,
+            "outSR": 4326,
+            "outFields": "*",
             "returnGeometry": "true",
             "f": "json",
         }
@@ -215,8 +191,13 @@ def find_ponds(municipality: str, pond_name: str | None = None) -> dict[str, Any
             "candidates": candidates,
             "message": "Bylo nalezeno více rybníků. Vyberte prosím konkrétní kandidáta.",
         }
-    except (requests.RequestException, ValueError, TypeError):
-        return _fallback_demo_candidates(municipality, pond_name)
+    except (requests.RequestException, ValueError, TypeError) as exc:
+        return {
+            "status": "error",
+            "municipality": municipality,
+            "message": f"Vyhledávání rybníků se nepodařilo dokončit: {type(exc).__name__}. Zkuste to prosím později.",
+            "candidates": [],
+        }
 
 
 def get_pond_by_id(pond_id: str) -> dict[str, Any] | None:
@@ -238,8 +219,9 @@ def get_pond_by_id(pond_id: str) -> dict[str, Any] | None:
             ZABAGED_URL,
             {
                 "where": f"fid_zbg = '{str(pond_id)}'",
+                "outFields": "*",
                 "returnGeometry": "true",
-                "outSR": 5514,
+                "outSR": 4326,
                 "f": "json",
             },
         )

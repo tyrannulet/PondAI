@@ -2,11 +2,26 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import date, timedelta
 from typing import Any
 
 from scripts.config import get_featherless_config, has_real_featherless
 from scripts.geo_sources import find_ponds
 from scripts.satellite import analyze_algae_bloom, analyze_pond
+
+MUNICIPALITY_ALIASES = {
+    "valmez": "Valašské Meziříčí",
+    "valmezu": "Valašské Meziříčí",
+    "valašském meziříčí": "Valašské Meziříčí",
+    "valašským meziříčím": "Valašské Meziříčí",
+    "hk": "Hradec Králové",
+    "hradecku": "Hradec Králové",
+    "čb": "České Budějovice",
+    "cb": "České Budějovice",
+    "českých budějovicích": "České Budějovice",
+    "mb": "Mladá Boleslav",
+    "mladé boleslavi": "Mladá Boleslav",
+}
 
 try:
     from openai import OpenAI
@@ -27,20 +42,29 @@ def _extract_date_range(prompt: str) -> tuple[str | None, str | None]:
         start_year = years[0]
         end_year = years[-1]
         return f"{start_year}-01-01", f"{end_year}-12-31"
+    if re.search(r"\bposledn(?:í|ím)\s+měsíc", prompt, flags=re.IGNORECASE):
+        end = date.today()
+        return (end - timedelta(days=30)).isoformat(), end.isoformat()
     return None, None
 
 
+def _canonicalize_municipality(name: str) -> str:
+    cleaned = re.sub(r"\s+", " ", name).strip(" \t\r\n.,;:!?")
+    return MUNICIPALITY_ALIASES.get(cleaned.casefold(), cleaned)
+
+
 def _extract_municipality(prompt: str) -> str | None:
+    stop_words = r"(?:a|za|od|do|pro|během|poslední|minulý|minulém|celý|celou)"
     patterns = [
-        r"v\s+([A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽa-záčďéěíňóřšťúůýž\s-]+?)(?:\s+za\b|\s+od\b|\s+do\b|\s+pro\b|\.|\?|!|$)",
-        r"obec\s+([A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽa-záčďéěíňóřšťúůýž\s-]+?)(?:\s+za\b|\s+od\b|\s+do\b|\.|\?|!|$)",
+        rf"\b(?:v|ve)\s+([A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽa-záčďéěíňóřšťúůýž\s-]+?)(?=\s+{stop_words}\b|[,;.!?]|$)",
+        rf"\b(?:obec|město|městě)\s+([A-ZÁČĎÉĚÍŇÓŘŠŤÚŮÝŽa-záčďéěíňóřšťúůýž\s-]+?)(?=\s+{stop_words}\b|[,;.!?]|$)",
     ]
     for pattern in patterns:
         match = re.search(pattern, prompt, flags=re.IGNORECASE)
         if match:
             text = match.group(1).strip()
             if text and len(text) > 1:
-                return text
+                return _canonicalize_municipality(text)
     return None
 
 
@@ -139,16 +163,25 @@ def _call_featherless_tools(prompt: str, state: dict[str, Any] | None = None) ->
 
 
 def run_agent(prompt: str, state: dict[str, Any] | None = None) -> dict[str, Any]:
-    state = state or {}
+    if state is None:
+        state = {}
     if has_real_featherless():
         try:
-            return _call_featherless_tools(prompt, state)
+            ai_result = _call_featherless_tools(prompt, state)
+            if ai_result.get("analysis") is not None or ai_result.get("status"):
+                return ai_result
         except Exception:
             pass
 
     municipality = _extract_municipality(prompt) or state.get("last_municipality")
     pond_name = _extract_pond_name(prompt) or state.get("last_pond_name")
     date_from, date_to = _extract_date_range(prompt)
+    if date_from and date_to:
+        state["last_date_from"] = date_from
+        state["last_date_to"] = date_to
+    elif state.get("pending_candidates"):
+        date_from = state.get("last_date_from")
+        date_to = state.get("last_date_to")
 
     if not municipality:
         return {"response": "Neslyšel jsem název obce. Uveďte prosím obec, např. „rybník v Řitce“.", "analysis": None, "status": "awaiting_input"}
@@ -161,8 +194,16 @@ def run_agent(prompt: str, state: dict[str, Any] | None = None) -> dict[str, Any
         if selection:
             choice = int(selection.group(1))
             candidates = state["pending_candidates"]
-            selected = next((item for item in candidates if int(item["number"]) == choice), None)
-            if selected:
+            selected_candidate = next((item for item in candidates if int(item["number"]) == choice), None)
+            if selected_candidate:
+                selected = next(
+                    (
+                        item
+                        for item in state.get("pending_ponds", [])
+                        if item.get("pond_id") == selected_candidate["pond_id"]
+                    ),
+                    selected_candidate,
+                )
                 pond_id = selected["pond_id"]
                 state["selected_pond"] = selected
                 if not date_from or not date_to:
@@ -178,11 +219,13 @@ def run_agent(prompt: str, state: dict[str, Any] | None = None) -> dict[str, Any
                     f"{algae.get('interpretation', '')}"
                 )
                 state["pending_candidates"] = None
+                state["pending_ponds"] = None
                 return {"response": response, "analysis": {**analysis, "algae": algae}, "selected_pond": selected, "status": "completed"}
 
     pond_search = find_ponds(municipality, pond_name)
     if pond_search.get("status") == "multiple":
         state["pending_candidates"] = pond_search["candidates"]
+        state["pending_ponds"] = pond_search.get("result", [])
         choices = ", ".join(f"{item['number']}: {item['name']} ({item['area_m2']} m²)" for item in pond_search["candidates"])
         return {"response": "Našel jsem více rybníků v obci. Vyberte prosím jeden z kandidátů: " + choices + ".", "analysis": None, "status": "awaiting_choice", "choices": pond_search["candidates"]}
 
