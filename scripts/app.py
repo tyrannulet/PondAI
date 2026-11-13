@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from typing import Any
+from contextlib import contextmanager
+from html import escape
+from typing import Any, Iterator
 
 import pandas as pd
 import plotly.express as px
@@ -10,6 +12,59 @@ from streamlit_folium import st_folium
 from scripts import demo_data
 from scripts.agent import _fallback_chart_interpretation, _requests_charts, run_agent
 from scripts.config import APP_SUBTITLE, APP_TITLE, get_api_status, has_real_copernicus, has_real_featherless
+
+
+THINKING_ICONS = (
+    "🎣", "🐟", "🚣", "🏊", "🛶", "🏄", "⛵", "🏖️", "💧",
+)
+
+
+@contextmanager
+def _pond_thinking(message: str) -> Iterator[None]:
+    """Cycle pond motifs in the browser while the agent runs synchronously."""
+    placeholder = st.empty()
+    duration = len(THINKING_ICONS) * 1.2
+    visible_percent = 100 / len(THINKING_ICONS)
+    icons = "".join(
+        f'<span style="animation-delay: {index * 1.2:.1f}s">{icon}</span>'
+        for index, icon in enumerate(THINKING_ICONS)
+    )
+    placeholder.markdown(
+        f"""
+        <style>
+        .pond-thinking {{
+            display: flex; align-items: center; gap: .75rem;
+            padding: .75rem 0;
+        }}
+        .pond-thinking-icons {{
+            display: inline-grid; flex: 0 0 2.75rem;
+            width: 2.75rem; height: 2.75rem;
+            place-items: center; font-size: 2rem; line-height: 1;
+        }}
+        .pond-thinking-icons span {{
+            grid-area: 1 / 1; opacity: 0;
+            animation: pond-icon-cycle {duration:.1f}s linear infinite;
+        }}
+        @keyframes pond-icon-cycle {{
+            0%, {visible_percent - .01:.2f}% {{ opacity: 1; }}
+            {visible_percent:.2f}%, 100% {{ opacity: 0; }}
+        }}
+        @media (prefers-reduced-motion: reduce) {{
+            .pond-thinking-icons span {{ animation: none; }}
+            .pond-thinking-icons span:first-child {{ opacity: 1; }}
+        }}
+        </style>
+        <div class="pond-thinking" role="status">
+            <span class="pond-thinking-icons" aria-hidden="true">{icons}</span>
+            <span>{escape(message)}</span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    try:
+        yield
+    finally:
+        placeholder.empty()
 
 
 def _default_analysis() -> dict[str, Any]:
@@ -142,7 +197,7 @@ def _render_pond_picker() -> None:
             (item for item in options if item.get("pond_id") == pond.get("pond_id")),
             options[selected_index],
         )
-        with st.spinner("Preparing the selected water-body analysis…"):
+        with _pond_thinking("Preparing the selected water-body analysis…"):
             result = run_agent(str(candidate["number"]), st.session_state)
         st.session_state["analysis"] = result.get("analysis")
         st.session_state["selected_pond"] = result.get("selected_pond") or pond
@@ -211,7 +266,7 @@ def main() -> None:
 
         if _requests_charts(prompt):
             st.session_state["show_charts"] = True
-        with st.spinner("Understanding your request and preparing the analysis…"):
+        with _pond_thinking("Understanding your request and preparing the analysis…"):
             result = run_agent(prompt, st.session_state)
         if result.get("status") == "awaiting_choice":
             st.session_state["analysis"] = None
